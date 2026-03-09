@@ -89,12 +89,14 @@ class RelayClient:
 
     # ──── Agent sync ────
 
-    async def sync_agents(self, agents: list[dict]) -> list[dict]:
+    async def sync_agents(
+        self, agents: list[dict], *, prune_missing: bool = True,
+    ) -> list[dict]:
         """POST /api/v1/relay/hub/{hub_id}/agents/sync"""
         client = await self._get_http_client()
         resp = await client.post(
             f"{self._base}/api/v1/relay/hub/{self._hub_id}/agents/sync",
-            json={"agents": agents},
+            json={"agents": agents, "prune_missing": prune_missing},
             headers={"X-API-Key": self._api_key},
         )
         resp.raise_for_status()

@@ -187,7 +187,12 @@ class AgentRegistry:
     # ──── Sync payload ────
 
     def to_sync_payload(self) -> list[dict]:
-        """Convert registry to HubAgentSyncRequest format."""
+        """Convert registry to HubAgentSyncRequest format.
+
+        Includes all known agents regardless of health status so that
+        a transient health-check failure doesn't cause the cloud to
+        prune agents that still exist locally.
+        """
         return [
             {
                 "local_agent_id": a.local_agent_id,
@@ -197,7 +202,6 @@ class AgentRegistry:
                 "agent_card": a.agent_card,
             }
             for a in self._agents.values()
-            if a.healthy
         ]
 
 
