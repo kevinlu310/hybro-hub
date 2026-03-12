@@ -47,7 +47,7 @@ Homepage = "https://hybro.ai"
 Repository = "https://github.com/hybro-ai/hybro-hub"
 
 [tool.hatch.build.targets.wheel]
-packages = ["hybro_sdk", "hub"]
+packages = ["hybro_hub", "hub"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

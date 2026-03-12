@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import httpx
 
-from hybro_sdk._sse import iter_sse_events
-from hybro_sdk.errors import (
+from hybro_hub._sse import iter_sse_events
+from hybro_hub.errors import (
     AccessDeniedError,
     AgentCommunicationError,
     AgentNotFoundError,
@@ -17,7 +17,7 @@ from hybro_sdk.errors import (
     RateLimitError,
     raise_for_status,
 )
-from hybro_sdk.models import AgentInfo, DiscoveryResponse, StreamEvent
+from hybro_hub.models import AgentInfo, DiscoveryResponse, StreamEvent
 
 _DEFAULT_BASE_URL = "https://api.hybro.ai/api/v1"
 

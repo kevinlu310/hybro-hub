@@ -259,7 +259,7 @@ Any agent that speaks the [A2A protocol](https://github.com/a2aproject/A2A) work
 
 ### Auto-discovery
 
-With `auto_discover: true` (the default), the hub automatically finds A2A agents running on localhost by probing listening TCP ports for agent cards at `/.well-known/agent.json`. Just start your agent — the hub will find it.
+With `auto_discover: true` (the default), the hub automatically finds A2A agents running on localhost by probing listening TCP ports for agent cards at `/.well-known/agent.json` or `/.well-known/agent-card.json`. Just start your agent — the hub will find it.
 
 ### Manual registration
 
@@ -294,13 +294,13 @@ The hub discovers it automatically and syncs it to hybro.ai.
 
 ## Hybro SDK (Python Client)
 
-The repo also ships `hybro_sdk` — a Python client for calling cloud agents programmatically via the Hybro Gateway API. Use this when you want to integrate cloud agents into your own code, outside of the hub.
+The repo also ships `hybro_hub` — a Python client for calling cloud agents programmatically via the Hybro Gateway API. Use this when you want to integrate cloud agents into your own code, outside of the hub.
 
 ### Quickstart
 
 ```python
 import asyncio
-from hybro_sdk import HybroGateway
+from hybro_hub import HybroGateway
 
 async def main():
     async with HybroGateway(api_key="hybro_...") as gw:
@@ -323,7 +323,7 @@ asyncio.run(main())
 ### Error handling
 
 ```python
-from hybro_sdk import AuthError, RateLimitError, AgentNotFoundError
+from hybro_hub import AuthError, RateLimitError, AgentNotFoundError
 
 try:
     result = await gw.send(agent_id, "Hello")
