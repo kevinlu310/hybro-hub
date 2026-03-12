@@ -54,10 +54,13 @@ class HubDaemon:
         self._last_sync_payload: list[dict] | None = None
         self._drain_task: asyncio.Task | None = None
         self._startup_drain_task: asyncio.Task | None = None
+        self._run_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         """Main entry point — run the hub daemon."""
         loop = asyncio.get_running_loop()
+        self._run_task = asyncio.current_task()
+
         try:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, self._signal_shutdown)
@@ -429,6 +432,9 @@ class HubDaemon:
     def _signal_shutdown(self) -> None:
         logger.info("Shutdown signal received")
         self._shutdown_event.set()
+        # Cancel the main task to unblock any awaits (e.g., SSE read)
+        if self._run_task and not self._run_task.done():
+            self._run_task.cancel()
 
     async def _shutdown(self) -> None:
         logger.info("Shutting down hub daemon...")
