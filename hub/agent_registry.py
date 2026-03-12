@@ -337,20 +337,19 @@ def _ports_windows() -> set[int] | None:
 
 # lsof is a Core OS component on macOS — always at /usr/sbin/lsof.
 _LSOF_BIN = "/usr/sbin/lsof"
-# Match the NAME column: optional host (*, localhost, 127.0.0.1, [::1], etc.)
-# followed by a colon and port, then " (LISTEN)".
-# Group 1: host (may be absent if the whole field is just ":port")
-# Group 2: port number
+# Match the NAME column: host (*, localhost, 127.0.0.1, [::1], etc.)
+# followed by a colon, port number, and " (LISTEN)".
+# Group 1: host   Group 2: port number
 _LSOF_RE = re.compile(r"(?:^|[\s])(\S+):(\d+) \(LISTEN\)")
 
 # Hosts that lsof reports for wildcard / loopback binds we care about.
+# lsof -n wraps IPv6 addresses in brackets (e.g. [::1]), so bare "::1" never
+# appears in the NAME column and is intentionally absent here.
 _LSOF_LOCALHOST_HOSTS = frozenset({
     "*",          # wildcard — reachable on any interface including localhost
     "localhost",
     "127.0.0.1",
     "[::1]",
-    "::1",
-    "",
 })
 
 
@@ -461,11 +460,34 @@ def _ports_connect_scan(start: int, end: int) -> set[int]:
     This is the universal fallback — requires no OS files, no external
     commands, and no elevated privileges.  It is slower than the
     OS-specific strategies but parallelised with a thread pool.
+
+    Both 127.0.0.1 (IPv4) and ::1 (IPv6) are probed so that agents bound
+    exclusively to the IPv6 loopback are detected, consistent with how the
+    OS-specific strategies treat ::1 as a local address.
     """
+    # Check IPv6 availability once, before spawning threads, to avoid a
+    # data race on the cached flag inside worker threads.
+    ipv6_available = _check_ipv6_available()
+
     def _probe(port: int) -> int | None:
+        # IPv4 probe
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(_SCAN_TIMEOUT)
-            return port if s.connect_ex(("127.0.0.1", port)) == 0 else None
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return port
+
+        # IPv6 probe — only if the OS has IPv6 support
+        if ipv6_available:
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                    s.settimeout(_SCAN_TIMEOUT)
+                    # connect_ex for IPv6 takes (host, port, flowinfo, scope_id)
+                    if s.connect_ex(("::1", port, 0, 0)) == 0:
+                        return port
+            except OSError:
+                pass
+
+        return None
 
     ports: set[int] = set()
     with ThreadPoolExecutor(max_workers=_SCAN_MAX_WORKERS) as pool:
@@ -473,6 +495,16 @@ def _ports_connect_scan(start: int, end: int) -> set[int]:
             if result is not None:
                 ports.add(result)
     return ports
+
+
+def _check_ipv6_available() -> bool:
+    """Return True if the OS can create an AF_INET6 socket."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM):
+            pass
+        return True
+    except OSError:
+        return False
 
 
 def _extract_capabilities(card: dict) -> list[str]:

@@ -10,6 +10,7 @@ import pytest
 from hub.agent_registry import (
     AgentRegistry,
     LocalAgent,
+    _check_ipv6_available,
     _decode_proc_ip,
     _extract_capabilities,
     _get_listening_ports,
@@ -18,6 +19,7 @@ from hub.agent_registry import (
     _ports_macos,
 )
 from hub.config import HubConfig, LocalAgentConfig
+import pydantic
 
 
 @pytest.fixture
@@ -377,21 +379,73 @@ class TestPortsLinux:
 class TestPortsConnectScan:
     """Unit tests for _ports_connect_scan()."""
 
-    def test_detects_open_port(self):
-        def fake_connect_ex(addr):
-            return 0 if addr == ("127.0.0.1", 9999) else 111  # ECONNREFUSED
+    def _make_mock_socket(self, open_on_ipv4=None, open_on_ipv6=None):
+        """Return a socket constructor mock that simulates selective open ports.
 
-        mock_sock = MagicMock()
-        mock_sock.__enter__ = lambda s: s
-        mock_sock.__exit__ = MagicMock(return_value=False)
-        mock_sock.connect_ex.side_effect = fake_connect_ex
+        open_on_ipv4: port that returns 0 (success) on 127.0.0.1
+        open_on_ipv6: port that returns 0 (success) on ::1
+        """
+        def socket_factory(family, *args, **kwargs):
+            sock = MagicMock()
+            sock.__enter__ = lambda s: s
+            sock.__exit__ = MagicMock(return_value=False)
 
-        with patch("socket.socket", return_value=mock_sock):
+            if family == socket.AF_INET:
+                def connect_ex_ipv4(addr):
+                    return 0 if open_on_ipv4 and addr[1] == open_on_ipv4 else 111
+                sock.connect_ex.side_effect = connect_ex_ipv4
+            else:
+                def connect_ex_ipv6(addr):
+                    return 0 if open_on_ipv6 and addr[1] == open_on_ipv6 else 111
+                sock.connect_ex.side_effect = connect_ex_ipv6
+
+            return sock
+
+        return socket_factory
+
+    def test_detects_ipv4_open_port(self):
+        with patch("socket.socket", side_effect=self._make_mock_socket(open_on_ipv4=9999)):
             ports = _ports_connect_scan(9998, 10000)
-
         assert 9999 in ports
         assert 9998 not in ports
         assert 10000 not in ports
+
+    def test_detects_ipv6_only_port(self):
+        """A port bound exclusively to ::1 must be detected via the IPv6 probe."""
+        with patch("socket.socket", side_effect=self._make_mock_socket(open_on_ipv6=9001)):
+            ports = _ports_connect_scan(9000, 9002)
+        assert 9001 in ports
+        assert 9000 not in ports
+
+    def test_detects_port_open_on_both_families(self):
+        with patch("socket.socket", side_effect=self._make_mock_socket(open_on_ipv4=8080, open_on_ipv6=8080)):
+            ports = _ports_connect_scan(8080, 8080)
+        assert 8080 in ports
+
+    def test_ipv6_unavailable_does_not_raise(self):
+        """If IPv6 is unavailable, scan completes using IPv4 only."""
+        def ipv4_only_socket(family, *args, **kwargs):
+            sock = MagicMock()
+            sock.__enter__ = lambda s: s
+            sock.__exit__ = MagicMock(return_value=False)
+            sock.connect_ex.return_value = 111  # ECONNREFUSED
+            return sock
+
+        with patch("hub.agent_registry._check_ipv6_available", return_value=False), \
+             patch("socket.socket", side_effect=ipv4_only_socket):
+            ports = _ports_connect_scan(9000, 9001)
+        assert ports == set()
+
+    def test_check_ipv6_available_returns_true_when_supported(self):
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = lambda s: s
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        with patch("socket.socket", return_value=mock_sock):
+            assert _check_ipv6_available() is True
+
+    def test_check_ipv6_available_returns_false_when_unsupported(self):
+        with patch("socket.socket", side_effect=OSError("IPv6 not supported")):
+            assert _check_ipv6_available() is False
 
     def test_empty_range_returns_empty(self):
         ports = _ports_connect_scan(10, 9)  # invalid range
@@ -412,3 +466,46 @@ class TestExtractCapabilities:
 
     def test_empty_card(self):
         assert _extract_capabilities({}) == []
+
+
+class TestScanRangeValidator:
+    """Tests for HubConfig.auto_discover_scan_range validation."""
+
+    def _make(self, scan_range):
+        return HubConfig(api_key="test", auto_discover_scan_range=scan_range)
+
+    def test_none_is_valid(self):
+        cfg = self._make(None)
+        assert cfg.auto_discover_scan_range is None
+
+    def test_valid_range(self):
+        cfg = self._make([8000, 9999])
+        assert cfg.auto_discover_scan_range == [8000, 9999]
+
+    def test_equal_start_end_is_valid(self):
+        cfg = self._make([9001, 9001])
+        assert cfg.auto_discover_scan_range == [9001, 9001]
+
+    def test_boundary_ports_are_valid(self):
+        cfg = self._make([0, 65535])
+        assert cfg.auto_discover_scan_range == [0, 65535]
+
+    def test_too_few_elements(self):
+        with pytest.raises(pydantic.ValidationError, match="exactly \\[start, end\\]"):
+            self._make([7000])
+
+    def test_too_many_elements(self):
+        with pytest.raises(pydantic.ValidationError, match="exactly \\[start, end\\]"):
+            self._make([1, 2, 3])
+
+    def test_start_port_out_of_range(self):
+        with pytest.raises(pydantic.ValidationError, match="start port -1"):
+            self._make([-1, 9000])
+
+    def test_end_port_out_of_range(self):
+        with pytest.raises(pydantic.ValidationError, match="end port 65536"):
+            self._make([1024, 65536])
+
+    def test_start_greater_than_end(self):
+        with pytest.raises(pydantic.ValidationError, match="start.*must be <= end"):
+            self._make([9000, 8000])

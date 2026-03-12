@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,27 @@ class HubConfig(BaseModel):
     # Optional [start, end] range for the connect-scan fallback strategy.
     # When null the full unprivileged range (1024–65535) is used.
     auto_discover_scan_range: list[int] | None = None
+
+    @field_validator("auto_discover_scan_range")
+    @classmethod
+    def _validate_scan_range(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return v
+        if len(v) != 2:
+            raise ValueError(
+                f"auto_discover_scan_range must be exactly [start, end], got {v!r}"
+            )
+        start, end = v
+        for name, port in (("start", start), ("end", end)):
+            if not (0 <= port <= 65535):
+                raise ValueError(
+                    f"auto_discover_scan_range {name} port {port} is out of range 0–65535"
+                )
+        if start > end:
+            raise ValueError(
+                f"auto_discover_scan_range start ({start}) must be <= end ({end})"
+            )
+        return v
 
     privacy_default_routing: str = "local_first"
     privacy_sensitive_keywords: list[str] = Field(default_factory=list)
