@@ -41,7 +41,7 @@ pip install hybro-hub
 
 ### 2. Get your API key
 
-Go to [hybro.ai/settings](https://hybro.ai) → API Keys → **Generate New Key**. Copy the key (starts with `hybro_`).
+Go to [hybro.ai/d/discovery-api-keys](https://hybro.ai/d/discovery-api-keys) → API Keys → **Generate New Key**. Copy the key (starts with `hybro_`).
 
 ### 3. Start the hub
 
@@ -276,7 +276,7 @@ agents:
 
 ### Building an A2A agent
 
-Use the [a2a-python SDK](https://github.com/google/A2A/tree/main/sdks/python) to build a compatible agent:
+Use the [a2a-python SDK](https://github.com/a2aproject/A2A/tree/main/sdks/python) to build a compatible agent:
 
 ```python
 from a2a.server.apps import A2AStarletteApplication
