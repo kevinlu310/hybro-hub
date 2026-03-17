@@ -130,7 +130,11 @@ class PublishQueue:
         event_json = json.dumps(event)
         max_retries = self._max_retries_for(event_type)
 
-        cur = self._conn.execute(  # type: ignore[union-attr]
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("PublishQueue is closed")
+
+        cur = conn.execute(
             """
             INSERT INTO publish_queue
                 (room_id, agent_message_id, event_json, event_type, priority,
@@ -140,7 +144,7 @@ class PublishQueue:
             (room_id, agent_message_id, event_json, event_type, priority,
              now, max_retries, now),
         )
-        self._conn.commit()  # type: ignore[union-attr]
+        conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
 
     async def update_retry(
@@ -162,7 +166,10 @@ class PublishQueue:
         next_retry_at: float,
         error: str | None,
     ) -> None:
-        self._conn.execute(  # type: ignore[union-attr]
+        conn = self._conn
+        if conn is None:
+            return
+        conn.execute(
             """
             UPDATE publish_queue
                SET retry_count = ?, next_retry_at = ?, last_error = ?
@@ -170,17 +177,20 @@ class PublishQueue:
             """,
             (retry_count, next_retry_at, error, event_id),
         )
-        self._conn.commit()  # type: ignore[union-attr]
+        conn.commit()
 
     async def delete(self, event_id: int) -> None:
         async with self._lock:
             await asyncio.to_thread(self._delete_sync, event_id)
 
     def _delete_sync(self, event_id: int) -> None:
-        self._conn.execute(  # type: ignore[union-attr]
+        conn = self._conn
+        if conn is None:
+            return
+        conn.execute(
             "DELETE FROM publish_queue WHERE id = ?", (event_id,)
         )
-        self._conn.commit()  # type: ignore[union-attr]
+        conn.commit()
 
     # ──── Read operations ────
 
@@ -192,7 +202,10 @@ class PublishQueue:
             return await asyncio.to_thread(self._get_ready_events_sync, now, limit)
 
     def _get_ready_events_sync(self, now: float, limit: int) -> list[_QueueRow]:
-        cur = self._conn.execute(  # type: ignore[union-attr]
+        conn = self._conn
+        if conn is None:
+            return []
+        cur = conn.execute(
             """
             SELECT id, room_id, agent_message_id, event_json,
                    retry_count, max_retries
@@ -210,7 +223,10 @@ class PublishQueue:
             return await asyncio.to_thread(self._get_stats_sync)
 
     def _get_stats_sync(self) -> dict[str, int]:
-        cur = self._conn.execute(  # type: ignore[union-attr]
+        conn = self._conn
+        if conn is None:
+            return {"total": 0, "critical": 0, "normal": 0}
+        cur = conn.execute(
             """
             SELECT
                 COUNT(*) AS total,
@@ -230,12 +246,15 @@ class PublishQueue:
             return await asyncio.to_thread(self._cleanup_expired_sync)
 
     def _cleanup_expired_sync(self) -> int:
+        conn = self._conn
+        if conn is None:
+            return 0
         cutoff = time.time() - self._ttl_seconds
-        cur = self._conn.execute(  # type: ignore[union-attr]
+        cur = conn.execute(
             "DELETE FROM publish_queue WHERE created_at < ?", (cutoff,)
         )
-        self._conn.commit()  # type: ignore[union-attr]
-        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # type: ignore[union-attr]
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return cur.rowcount
 
     async def cleanup_by_size(self) -> int:
@@ -244,6 +263,9 @@ class PublishQueue:
             return await asyncio.to_thread(self._cleanup_by_size_sync)
 
     def _cleanup_by_size_sync(self) -> int:
+        conn = self._conn
+        if conn is None:
+            return 0
         try:
             db_size = self._db_path.stat().st_size
         except FileNotFoundError:
@@ -251,12 +273,12 @@ class PublishQueue:
         if db_size <= self._max_size_bytes:
             return 0
 
-        total = self._conn.execute(  # type: ignore[union-attr]
+        total = conn.execute(
             "SELECT COUNT(*) FROM publish_queue"
         ).fetchone()[0]
         to_delete = max(1, total // 10)
 
-        cur = self._conn.execute(  # type: ignore[union-attr]
+        cur = conn.execute(
             """
             DELETE FROM publish_queue
              WHERE id IN (
@@ -267,11 +289,10 @@ class PublishQueue:
             """,
             (to_delete,),
         )
-        self._conn.commit()  # type: ignore[union-attr]
+        conn.commit()
 
-        # VACUUM is expensive; only run when we're removing a large chunk.
         if to_delete > total * 0.2:
-            self._conn.execute("VACUUM")  # type: ignore[union-attr]
+            conn.execute("VACUUM")
 
         return cur.rowcount
 

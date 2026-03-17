@@ -98,6 +98,9 @@ class HubDaemon:
                         batch_size=self.config.publish_queue.drain_batch_size
                     )
                 )
+                self._startup_drain_task.add_done_callback(
+                    lambda t: t.exception() if not t.cancelled() else None
+                )
 
         # Register with relay
         await self.relay.register()
@@ -254,23 +257,21 @@ class HubDaemon:
 
         logger.info("Forwarding cancel_task to %s (task=%s)", agent.name, task_id)
         try:
-            import httpx as _httpx
-
-            async with _httpx.AsyncClient(timeout=10) as client:
-                cancel_body = {
-                    "jsonrpc": "2.0",
-                    "id": uuid4().hex,
-                    "method": "tasks/cancel",
-                    "params": {"id": task_id},
-                }
-                resp = await client.post(
-                    agent.url,
-                    json=cancel_body,
-                    headers={"Content-Type": "application/json"},
-                )
-                logger.info(
-                    "Cancel response from %s: %d", agent.name, resp.status_code
-                )
+            client = await self.dispatcher._get_client()
+            cancel_body = {
+                "jsonrpc": "2.0",
+                "id": uuid4().hex,
+                "method": "tasks/cancel",
+                "params": {"id": task_id},
+            }
+            resp = await client.post(
+                agent.url,
+                json=cancel_body,
+                headers={"Content-Type": "application/json"},
+            )
+            logger.info(
+                "Cancel response from %s: %d", agent.name, resp.status_code
+            )
         except Exception:
             logger.warning("Failed to cancel task on %s (best-effort)", agent.name, exc_info=True)
 

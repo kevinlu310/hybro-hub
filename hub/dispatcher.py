@@ -63,7 +63,7 @@ class Dispatcher:
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
+        if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
 

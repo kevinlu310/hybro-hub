@@ -84,7 +84,7 @@ class AgentRegistry:
         return dict(self._agents)
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
+        if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT)
         return self._client
 

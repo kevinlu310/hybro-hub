@@ -77,7 +77,10 @@ class RelayClient:
         self._should_stop = True
         for client in (self._http_client, self._sse_client):
             if client is not None:
-                await client.aclose()
+                try:
+                    await client.aclose()
+                except Exception:
+                    logger.debug("Error closing HTTP client", exc_info=True)
         self._http_client = None
         self._sse_client = None
 
