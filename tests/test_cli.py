@@ -1,4 +1,4 @@
-"""Tests for hub.cli — instance lock, start, and stop commands."""
+"""Tests for hub.cli — instance lock, start, stop, and status commands."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -454,3 +455,199 @@ class TestStopGracefulShutdown:
 
         # NoSuchProcess on kill() must not propagate — graceful degradation
         assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+# ── status command ───────────────────────────────────────────────────────────
+
+
+def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://gateway.example/status")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+class TestStatusNoApiKey:
+    def test_shows_local_and_cloud_hint(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", tmp_path / "hub.log")
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config(api_key="")):
+            result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        out = result.output.lower()
+        assert "local daemon" in out
+        assert "stopped" in out
+        assert "no api key" in out or "api key" in out
+
+
+class TestStatusLocalDaemon:
+    def test_running_shows_pid_and_log_path(self, runner, tmp_path, monkeypatch):
+        log_path = tmp_path / "hub.log"
+        monkeypatch.setattr("hub.cli.LOG_FILE", log_path)
+        mock_proc = MagicMock()
+        mock_proc.cmdline.return_value = ["/venv/bin/hybro-hub", "start"]
+
+        with patch("hub.cli.read_lock_pid", return_value=4242), \
+             patch("psutil.Process", return_value=mock_proc), \
+             patch("hub.cli.load_config", return_value=_mock_config()):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "4242" in result.output
+        assert "running" in result.output.lower()
+        assert str(log_path) in result.output
+
+    def test_stopped_when_no_lock_pid(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "stopped" in result.output.lower()
+        relay.get_status.assert_awaited_once()
+        relay.close.assert_awaited_once()
+
+    def test_stale_pid_when_process_not_hub_like(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        mock_proc = MagicMock()
+        mock_proc.cmdline.return_value = ["/usr/bin/python3", "-c", "print(1)"]
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=999), \
+             patch("psutil.Process", return_value=mock_proc), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "stale" in result.output.lower()
+        assert "999" in result.output
+
+    def test_stopped_when_process_missing(self, runner, monkeypatch):
+        import psutil
+
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=888), \
+             patch("psutil.Process", side_effect=psutil.NoSuchProcess(888)), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "stopped" in result.output.lower()
+        assert "stale" in result.output.lower()
+
+
+class TestStatusCloudRelay:
+    def test_no_hubs_registered(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "no hubs registered" in result.output.lower()
+
+    def test_lists_hub_and_agents(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        hub_id = "abcdef0123456789"
+        relay = MagicMock()
+        relay.get_status = AsyncMock(
+            return_value={
+                "hubs": [
+                    {
+                        "hub_id": hub_id,
+                        "is_online": True,
+                        "agent_count": 5,
+                        "active_agent_count": 3,
+                        "inactive_agent_count": 2,
+                    }
+                ]
+            }
+        )
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "online" in result.output.lower()
+        assert hub_id[:12] in result.output
+        assert "5" in result.output
+        assert "3" in result.output
+        assert "2" in result.output
+
+    def test_http_401_message(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(side_effect=_http_status_error(401))
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "authentication" in result.output.lower()
+
+    def test_http_403_message(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(side_effect=_http_status_error(403))
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "access denied" in result.output.lower()
+
+    def test_http_other_status_message(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(side_effect=_http_status_error(502))
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "502" in result.output
+
+    def test_generic_network_error_message(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(side_effect=OSError("network down"))
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "unreachable" in result.output.lower()
+        assert "network down" in result.output.lower()
