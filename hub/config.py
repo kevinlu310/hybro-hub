@@ -132,7 +132,7 @@ def load_config(
                     data["auto_discover_scan_range"] = agents_section[
                         "auto_discover_scan_range"
                     ]
-        logger.info("Loaded config from %s", path)
+        logger.debug("Loaded config from %s", path)
 
     # Env var overrides
     if env_key := os.environ.get("HYBRO_API_KEY"):
