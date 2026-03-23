@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-03-22
+
+### Added
+
+- Animated spinner on TTY for long-running operations in `agents`, `status`, and `stop` commands
+- `agents`: live scanning animation, per-agent ✓/✗ health symbol, and found-N summary line
+- `status`: ✓/✗ symbols for local daemon and cloud relay; animated dots during relay HTTP check
+- `start`: prints confirmation and log path before Unix double-fork
+
+### Changed
+
+- One-shot commands (`agents`, `status`, `stop`) suppress `hub.*` INFO logs to keep output clean; daemon (`start`) retains full INFO logging
+- `stop`: stale PID lock file is auto-removed; static "Stopping..." message on non-TTY, spinner on TTY
+- `agent start`: cleaner output formatting
+
+### Fixed
+
+- `_detach_windows()` was accidentally embedded inside `_spinning_wait()` — restored as a top-level function
+- `Callable` import moved to module level; removed string-quoted type annotation
+- `_spinning_wait` now checks condition before sleeping, avoiding a full interval of unnecessary delay for fast operations
+- Test fixtures: `mock_client.is_closed = False` added to prevent `httpx.AsyncClient` mock bypass in `test_agent_registry` and `test_dispatcher`
+- CLI stop tests updated to mock `_spinning_wait` directly instead of patching `time`
+
 ## [0.1.7.1] - 2026-03-21
 
 ### Changed
