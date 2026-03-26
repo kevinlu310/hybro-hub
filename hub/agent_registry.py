@@ -108,9 +108,7 @@ class AgentRegistry:
 
     async def _auto_discover(self) -> None:
         """Discover A2A agents by enumerating listening localhost ports."""
-        scan_range: tuple[int, int] | None = None
-        if self._config.agents.auto_discover_scan_range:
-            scan_range = tuple(self._config.agents.auto_discover_scan_range)  # type: ignore[assignment]
+        scan_range: tuple[int, int] | None = self._config.agents.auto_discover_scan_range
 
         ports = _get_listening_ports(
             exclude=set(self._config.agents.auto_discover_exclude_ports),

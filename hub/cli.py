@@ -12,12 +12,14 @@ import click
 import httpx
 
 from .config import (
+    load_config,
+    save_api_key,
+)
+from .lock import (
     LOCK_FILE,
     LOG_FILE,
     acquire_instance_lock,
-    load_config,
     read_lock_pid,
-    save_api_key,
     write_lock_pid,
 )
 from .main import HubDaemon

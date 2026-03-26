@@ -485,15 +485,15 @@ class TestScanRangeValidator:
 
     def test_valid_range(self):
         cfg = self._make([8000, 9999])
-        assert cfg.agents.auto_discover_scan_range == [8000, 9999]
+        assert cfg.agents.auto_discover_scan_range == (8000, 9999)
 
     def test_equal_start_end_is_valid(self):
         cfg = self._make([9001, 9001])
-        assert cfg.agents.auto_discover_scan_range == [9001, 9001]
+        assert cfg.agents.auto_discover_scan_range == (9001, 9001)
 
     def test_boundary_ports_are_valid(self):
         cfg = self._make([0, 65535])
-        assert cfg.agents.auto_discover_scan_range == [0, 65535]
+        assert cfg.agents.auto_discover_scan_range == (0, 65535)
 
     def test_too_few_elements(self):
         with pytest.raises(pydantic.ValidationError, match="exactly \\[start, end\\]"):

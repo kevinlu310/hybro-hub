@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import textwrap
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from hub.config import (
+    CloudConfig,
     HubConfig,
     _expand_env_vars,
     load_config,
@@ -259,3 +261,104 @@ class TestSaveApiKeyGuard:
         import yaml
         data = yaml.safe_load(config_file.read_text())
         assert data["cloud"]["api_key"] == "hybro_new"
+
+    def test_preserves_comments_on_save(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("# My important comment\ncloud:\n  api_key: hybro_old\n")
+        monkeypatch.setattr("hub.config.HYBRO_DIR", tmp_path)
+        monkeypatch.setattr("hub.config.CONFIG_FILE", config_file)
+        save_api_key("hybro_new")
+        assert "# My important comment" in config_file.read_text()
+
+
+# ── load_config ValidationError ───────────────────────────────────────────────
+
+
+class TestLoadConfigValidationError:
+    def test_invalid_field_raises_system_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("publish_queue:\n  max_size_mb: fifty\n")
+        with (
+            patch("hub.config.HUB_ID_FILE", tmp_path / "hub_id"),
+            patch("hub.config.HYBRO_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                load_config(config_path=config_file)
+        assert "Invalid config" in str(exc_info.value)
+
+
+# ── Unknown config keys ────────────────────────────────────────────────────────
+
+
+class TestUnknownConfigKeys:
+    def test_unknown_top_level_key_emits_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("heartbeat_intervall: 60\n")  # typo
+        with (
+            patch("hub.config.HUB_ID_FILE", tmp_path / "hub_id"),
+            patch("hub.config.HYBRO_DIR", tmp_path),
+        ):
+            with pytest.warns(UserWarning, match="heartbeat_intervall"):
+                load_config(config_path=config_file)
+
+    def test_unknown_nested_key_emits_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("agents:\n  auto_discoverr: true\n")  # typo
+        with (
+            patch("hub.config.HUB_ID_FILE", tmp_path / "hub_id"),
+            patch("hub.config.HYBRO_DIR", tmp_path),
+        ):
+            with pytest.warns(UserWarning, match="auto_discoverr"):
+                load_config(config_path=config_file)
+
+
+# ── CloudConfig.api_key empty string coercion ─────────────────────────────────
+
+
+class TestCloudConfigApiKeyCoercion:
+    def test_empty_string_coerced_to_none(self) -> None:
+        cfg = CloudConfig(api_key="")
+        assert cfg.api_key is None
+
+    def test_none_stays_none(self) -> None:
+        cfg = CloudConfig(api_key=None)
+        assert cfg.api_key is None
+
+    def test_valid_key_unchanged(self) -> None:
+        cfg = CloudConfig(api_key="hybro_abc123")
+        assert cfg.api_key == "hybro_abc123"
+
+
+# ── auto_discover_scan_range returns tuple ────────────────────────────────────
+
+
+class TestScanRangeTuple:
+    def test_valid_range_returns_tuple(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("agents:\n  auto_discover_scan_range: [10000, 11000]\n")
+        with (
+            patch("hub.config.HUB_ID_FILE", tmp_path / "hub_id"),
+            patch("hub.config.HYBRO_DIR", tmp_path),
+        ):
+            config = load_config(config_path=config_file)
+        assert config.agents.auto_discover_scan_range == (10000, 11000)
+        assert isinstance(config.agents.auto_discover_scan_range, tuple)
+
+    def test_null_scan_range_is_none(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        with (
+            patch("hub.config.HUB_ID_FILE", tmp_path / "hub_id"),
+            patch("hub.config.HYBRO_DIR", tmp_path),
+        ):
+            config = load_config(config_path=config_file)
+        assert config.agents.auto_discover_scan_range is None
+

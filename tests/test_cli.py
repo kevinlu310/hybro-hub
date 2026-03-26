@@ -31,8 +31,9 @@ for _mod in [
     sys.modules.setdefault(_mod, MagicMock())
 
 from hub import config as hub_config  # noqa: E402
+from hub import lock as hub_lock  # noqa: E402
 from hub.cli import _ENV_DAEMON_CHILD, _add_file_logging, _remove_lock_file, main  # noqa: E402
-from hub.config import LOCK_FILE, LOG_FILE, read_lock_pid, write_lock_pid  # noqa: E402
+from hub.lock import LOCK_FILE, LOG_FILE, read_lock_pid, write_lock_pid  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ def runner():
 @pytest.fixture()
 def _tmp_lock(tmp_path, monkeypatch):
     """Redirect LOCK_FILE to a tmp directory for isolation."""
-    monkeypatch.setattr(hub_config, "LOCK_FILE", tmp_path / "hub.lock")
+    monkeypatch.setattr(hub_lock, "LOCK_FILE", tmp_path / "hub.lock")
     monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
     return tmp_path
 
@@ -53,7 +54,7 @@ def _tmp_lock(tmp_path, monkeypatch):
 @pytest.fixture()
 def _tmp_log(tmp_path, monkeypatch):
     """Redirect LOG_FILE to a tmp directory."""
-    monkeypatch.setattr(hub_config, "LOG_FILE", tmp_path / "hub.log")
+    monkeypatch.setattr(hub_lock, "LOG_FILE", tmp_path / "hub.log")
     monkeypatch.setattr("hub.cli.LOG_FILE", tmp_path / "hub.log")
     return tmp_path
 
@@ -65,7 +66,7 @@ class TestRemoveLockFile:
     def test_deletes_existing_lock_file(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
         lock_path.write_text("12345", encoding="utf-8")
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
         _remove_lock_file()
         assert not lock_path.exists()
@@ -75,81 +76,81 @@ class TestRemoveLockFile:
         _remove_lock_file()  # must not raise
 
 
-# ── Instance lock (config.py) ────────────────────────────────────────────────
+# ── Instance lock (lock.py) ────────────────────────────────────────────────────
 
 
 class TestAcquireInstanceLock:
     def test_returns_file_handle_on_success(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
 
-        fh = hub_config.acquire_instance_lock()
+        fh = hub_lock.acquire_instance_lock()
         assert fh is not None
         assert not fh.closed
         fh.close()
 
     def test_exits_when_fcntl_raises(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
 
         import fcntl
         with patch.object(fcntl, "flock", side_effect=OSError("locked")):
             with pytest.raises(SystemExit) as exc_info:
-                hub_config.acquire_instance_lock()
+                hub_lock.acquire_instance_lock()
         assert exc_info.value.code == 1
 
     def test_exits_on_windows_lock_failure(self, tmp_path, monkeypatch):
         """Simulate the Windows msvcrt path by removing fcntl from sys.modules."""
         lock_path = tmp_path / "hub.lock"
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
 
         mock_msvcrt = MagicMock()
         mock_msvcrt.locking.side_effect = OSError("locked")
         with patch.dict(sys.modules, {"fcntl": None, "msvcrt": mock_msvcrt}):
             with pytest.raises(SystemExit) as exc_info:
-                hub_config.acquire_instance_lock()
+                hub_lock.acquire_instance_lock()
         assert exc_info.value.code == 1
 
 
 class TestWriteAndReadLockPid:
     def test_write_then_read_returns_pid(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
 
-        fh = hub_config.acquire_instance_lock()
-        hub_config.write_lock_pid(fh)
+        fh = hub_lock.acquire_instance_lock()
+        hub_lock.write_lock_pid(fh)
         fh.close()
 
-        pid = hub_config.read_lock_pid()
+        pid = hub_lock.read_lock_pid()
         assert pid == os.getpid()
 
     def test_read_returns_none_when_file_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hub_config, "LOCK_FILE", tmp_path / "no_such_file.lock")
-        assert hub_config.read_lock_pid() is None
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", tmp_path / "no_such_file.lock")
+        assert hub_lock.read_lock_pid() is None
 
     def test_read_returns_none_for_corrupt_content(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
         lock_path.write_text("not-a-number", encoding="utf-8")
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
-        assert hub_config.read_lock_pid() is None
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        assert hub_lock.read_lock_pid() is None
 
     def test_read_returns_none_for_empty_file(self, tmp_path, monkeypatch):
         lock_path = tmp_path / "hub.lock"
         lock_path.write_text("", encoding="utf-8")
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
-        assert hub_config.read_lock_pid() is None
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        assert hub_lock.read_lock_pid() is None
 
     def test_read_returns_none_on_oserror(self, tmp_path, monkeypatch):
         """OSError (e.g. Windows mandatory lock) must not propagate."""
         lock_path = tmp_path / "hub.lock"
-        monkeypatch.setattr(hub_config, "LOCK_FILE", lock_path)
-        with patch("hub.config.LOCK_FILE") as mock_path:
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        with patch("hub.lock.LOCK_FILE") as mock_path:
             mock_path.read_text.side_effect = OSError("lock violation")
-            result = hub_config.read_lock_pid()
+            result = hub_lock.read_lock_pid()
         assert result is None
 
 
