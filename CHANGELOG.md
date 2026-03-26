@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] - 2026-03-25
+
+### Added
+
+- `hub/lock.py`: extracted instance locking into a dedicated module
+- `ruamel.yaml` dependency to preserve YAML comments and formatting on `save_api_key()`
+- `HubConfig.hub_id` validator rejecting empty strings; enforce `load_config()` as the sole construction entry point
+- `Dispatcher.cancel_task()` method to encapsulate cancel task HTTP call (removes direct `_get_client()` access from `HubDaemon`)
+- Warn on unknown config keys in all models (catches typos such as `heartbeat_intervall`)
+- Tests: comment preservation, friendly validation errors, unknown-key warnings, `api_key` coercion, `scan_range` tuple type, multi-part text extraction, interactive state, cancel task, and `hub_id` empty-string rejection
+
+### Changed
+
+- `CloudConfig.api_key` changed from `str = ""` to `str | None = None` to distinguish "not set" from an empty string
+- `auto_discover_scan_range` type changed to `tuple[int, int]` for precision
+- All config models marked `frozen=True`; `hub_id` is pre-resolved before `HubConfig` construction
+- `HubConfig.heartbeat_interval` is now wired into `_heartbeat_loop` (was previously hardcoded)
+- `load_config()` wraps `ValidationError` in a user-friendly `SystemExit` message
+- Relay `register()` wrapped with targeted `httpx` error handlers in `_startup()` to surface 401/`ConnectError` as clear log messages instead of tracebacks
+- Removed unused `PublishQueueConfig.max_retries_streaming` field
+- Removed `PrivacyConfig.default_routing` and `RoutingPolicy` enum (no routing mechanism exists in the hub)
+
+### Fixed
+
+- `_extract_artifact_text`, `_status_text`, and `_message_text` now concatenate all text parts via `_collect_parts` instead of returning only the first part
+- `load_config()`: explicit YAML `null` values now treated the same as absent keys, fixing `ValidationError` on startup when list fields were commented out in `config.yaml`
+- `HubConfig` model validator coerces `None → []` for all `list[...]`-annotated fields, guarding against YAML null parsing
+- `processing_status(input_required)` is now emitted alongside `task_interactive` in the `INTERACTIVE_STATES` branch, matching all other terminal branches
+- Removed dead `else` clause from streaming refetch guard
+
 ## [0.1.8] - 2026-03-22
 
 ### Added
