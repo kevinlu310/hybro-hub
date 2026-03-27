@@ -706,4 +706,4 @@ def agent_start(
     click.echo("")
 
     logging.getLogger("a2a").setLevel(logging.WARNING)
-    serve_agent(adapter, port=effective_port, log_level="warning")
+    serve_agent(adapter, port=effective_port, access_log=False)
