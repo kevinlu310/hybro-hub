@@ -102,6 +102,19 @@ class HubDaemon:
                     lambda t: t.exception() if not t.cancelled() else None
                 )
 
+        # Discover local agents BEFORE registering with the relay.
+        # Registering first opens the message channel immediately, but the
+        # in-memory registry is still empty at that point — any message the
+        # cloud routes during the discovery window hits "agent not found".
+        # By discovering and syncing first, the hub only announces itself
+        # once it is fully ready to serve traffic (ready-before-register).
+        agents = await self.registry.discover()
+        if not agents:
+            logger.warning(
+                "No local agents found. Start an A2A agent and it will be "
+                "discovered automatically."
+            )
+
         # Register with relay
         try:
             await self.relay.register()
@@ -124,14 +137,6 @@ class HubDaemon:
                 self.config.cloud.gateway_url, exc,
             )
             raise SystemExit(1)
-
-        # Discover local agents
-        agents = await self.registry.discover()
-        if not agents:
-            logger.warning(
-                "No local agents found. Start an A2A agent and it will be "
-                "discovered automatically."
-            )
 
         # Sync agents to cloud
         await self._sync_agents()
