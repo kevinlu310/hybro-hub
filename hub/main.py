@@ -80,8 +80,8 @@ class HubDaemon:
     async def _startup(self) -> None:
         logger.info("Starting hub daemon (hub_id=%s)", self.config.hub_id)
 
-        # Initialise the disk-backed publish queue before registering so that
-        # any failures during startup can also fall back to the queue.
+        # Initialise the disk-backed publish queue first so that any publish
+        # failures during startup (registration, sync) can fall back to the queue.
         if self.config.publish_queue.enabled:
             queue_path = HYBRO_DIR / "data" / "publish_queue.db"
             self.relay.init_queue(queue_path, self.config.publish_queue)
