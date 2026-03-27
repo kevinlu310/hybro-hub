@@ -119,7 +119,7 @@ class Dispatcher:
             result.error_type = type(exc).__name__
 
         terminal: list[dict] = []
-        self._emit_terminal_events(terminal, result, agent_message_id, user_message_id)
+        self._emit_terminal_events(terminal, result, agent_message_id, user_message_id, agent.local_agent_id)
         yield terminal
 
     def _emit_terminal_events(
@@ -128,6 +128,7 @@ class Dispatcher:
         result: DispatchResult,
         agent_message_id: str,
         user_message_id: str | None,
+        agent_id: str | None = None,
     ) -> None:
         """Emit the terminal events (response/error + processing_status)."""
         if result.error:
@@ -184,6 +185,8 @@ class Dispatcher:
 
         response_text = result.artifact_text or result.text
         response_data: dict[str, Any] = {"content": response_text}
+        if agent_id is not None:
+            response_data["agent_id"] = agent_id
         if result.raw_parts:
             response_data["parts"] = result.raw_parts
 

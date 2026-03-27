@@ -75,6 +75,7 @@ class TestDispatchSync:
         assert len(events) == 2
         assert events[0]["type"] == "agent_response"
         assert events[0]["data"]["content"] == "Hi there!"
+        assert events[0]["data"]["agent_id"] == "test_001"
         assert events[1]["type"] == "processing_status"
         assert events[1]["data"]["status"] == "completed"
 
@@ -334,6 +335,31 @@ class TestInteractiveState:
         assert "processing_status" in types
 
 
+class TestEmitTerminalEventsAgentId:
+    """agent_id is included in agent_response data when provided."""
+
+    def test_agent_id_present_in_response(self):
+        dispatcher = Dispatcher()
+        from hub.dispatcher import DispatchResult
+        result = DispatchResult(task_state="completed", text="done")
+        events: list[dict] = []
+        dispatcher._emit_terminal_events(events, result, "am-003", "um-003", agent_id="my-agent-42")
+
+        response = next(e for e in events if e["type"] == "agent_response")
+        assert response["data"]["agent_id"] == "my-agent-42"
+        assert response["data"]["content"] == "done"
+
+    def test_agent_id_absent_when_not_provided(self):
+        dispatcher = Dispatcher()
+        from hub.dispatcher import DispatchResult
+        result = DispatchResult(task_state="completed", text="done")
+        events: list[dict] = []
+        dispatcher._emit_terminal_events(events, result, "am-004", "um-004")
+
+        response = next(e for e in events if e["type"] == "agent_response")
+        assert "agent_id" not in response["data"]
+
+
 class TestCancelTask:
     """Tests for Dispatcher.cancel_task()."""
 
@@ -443,6 +469,7 @@ class TestDispatchStreaming:
 
         response = next(e for e in terminal_events if e["type"] == "agent_response")
         assert response["data"]["content"] == "Hello world"
+        assert response["data"]["agent_id"] == "test_002"
 
     @pytest.mark.asyncio
     async def test_native_artifact_update_unchanged(self, streaming_agent):
