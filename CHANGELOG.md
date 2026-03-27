@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.12] - 2026-03-26
+
+### Changed
+
+- Suppress verbose logging when starting agents via `hybro-hub agent start`: set `a2a` logger hierarchy to `WARNING` and pass `log_level="warning"` to uvicorn, silencing access logs and `a2a.server.tasks.task_manager` INFO messages by default
+
 ## [0.1.11] - 2026-03-26
 
 ### Fixed
