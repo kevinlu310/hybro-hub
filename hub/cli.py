@@ -705,4 +705,5 @@ def agent_start(
         click.echo(f"  Config:  {config_path}")
     click.echo("")
 
-    serve_agent(adapter, port=effective_port)
+    logging.getLogger("a2a").setLevel(logging.WARNING)
+    serve_agent(adapter, port=effective_port, log_level="warning")
