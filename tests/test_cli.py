@@ -225,6 +225,25 @@ def _mock_config(api_key: str | None = "hybro_test_key"):
     return cfg
 
 
+def _mock_registry(agents=None):
+    """Return a mock AgentRegistry that returns *agents* from discover()."""
+    from hub.agent_registry import LocalAgent
+
+    if agents is None:
+        agents = []
+    registry = MagicMock()
+    registry.discover = AsyncMock(return_value=agents)
+    registry.close = AsyncMock()
+    return registry
+
+
+def _make_agent(name="TestAgent", url="http://localhost:9000", healthy=True):
+    """Construct a minimal LocalAgent for tests."""
+    from hub.agent_registry import LocalAgent
+
+    return LocalAgent(local_agent_id=f"id-{name}", name=name, url=url, healthy=healthy)
+
+
 class TestStartNoApiKey:
     def test_exits_with_error_when_no_api_key(self, runner):
         with patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
@@ -484,7 +503,8 @@ class TestStatusNoApiKey:
     def test_shows_local_and_cloud_hint(self, runner, tmp_path, monkeypatch):
         monkeypatch.setattr("hub.cli.LOG_FILE", tmp_path / "hub.log")
         with patch("hub.cli.read_lock_pid", return_value=None), \
-             patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
+             patch("hub.cli.load_config", return_value=_mock_config(api_key=None)), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()):
             result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         out = result.output.lower()
@@ -502,7 +522,12 @@ class TestStatusLocalDaemon:
 
         with patch("hub.cli.read_lock_pid", return_value=4242), \
              patch("psutil.Process", return_value=mock_proc), \
-             patch("hub.cli.load_config", return_value=_mock_config()):
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
+             patch("hub.cli.RelayClient", return_value=MagicMock(
+                 get_status=AsyncMock(return_value={"hubs": []}),
+                 close=AsyncMock(),
+             )):
             result = runner.invoke(main, ["status"])
 
         assert result.exit_code == 0
@@ -518,6 +543,7 @@ class TestStatusLocalDaemon:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -537,6 +563,7 @@ class TestStatusLocalDaemon:
         with patch("hub.cli.read_lock_pid", return_value=999), \
              patch("psutil.Process", return_value=mock_proc), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -555,6 +582,7 @@ class TestStatusLocalDaemon:
         with patch("hub.cli.read_lock_pid", return_value=888), \
              patch("psutil.Process", side_effect=psutil.NoSuchProcess(888)), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -572,6 +600,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -599,6 +628,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -608,6 +638,7 @@ class TestStatusCloudRelay:
         assert "5" in result.output
         assert "3" in result.output
         assert "2" in result.output
+        assert "may lag" in result.output.lower()
 
     def test_http_401_message(self, runner, monkeypatch):
         monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
@@ -617,6 +648,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -631,6 +663,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -645,6 +678,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -659,12 +693,74 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
         assert result.exit_code == 0
         assert "unreachable" in result.output.lower()
         assert "network down" in result.output.lower()
+
+
+class TestStatusLocalAgents:
+    """Tests for the local agent scan section in hybro-hub status."""
+
+    def test_shows_none_found_when_no_agents(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry(agents=[])), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "none found" in result.output.lower()
+
+    def test_shows_agent_count_and_health(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        agents = [
+            _make_agent("AgentA", "http://localhost:9001", healthy=True),
+            _make_agent("AgentB", "http://localhost:9002", healthy=False),
+        ]
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry(agents=agents)), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        out = result.output
+        assert "2" in out            # 2 found
+        assert "1" in out            # 1 healthy
+        assert "AgentA" in out
+        assert "AgentB" in out
+
+    def test_local_scan_error_is_graceful(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        broken_registry = MagicMock()
+        broken_registry.discover = AsyncMock(side_effect=RuntimeError("scan failed"))
+        broken_registry.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=broken_registry), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "error" in result.output.lower()
 
 
 # ── agent start --config ─────────────────────────────────────────────────────

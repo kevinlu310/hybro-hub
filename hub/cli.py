@@ -350,13 +350,12 @@ def status(ctx: click.Context) -> None:
 
     click.echo("")
 
-    # ── Cloud relay section ───────────────────────────────────────────────────
+    # ── Local agents section ──────────────────────────────────────────────────
     config = load_config()
-    if config.cloud.api_key is None:
-        click.echo("     Cloud relay:   No API key — run: hybro-hub start --api-key hybro_...")
-        return
 
-    async def _cloud_status() -> None:
+    async def _full_status() -> None:
+        from .agent_registry import AgentRegistry
+
         stop_event = asyncio.Event()
 
         async def _animate() -> None:
@@ -364,7 +363,7 @@ def status(ctx: click.Context) -> None:
             i = 0
             while True:
                 click.echo(
-                    f"\r  Checking cloud relay{frames[i % len(frames)]}",
+                    f"\r  Checking status{frames[i % len(frames)]}",
                     nl=False,
                     err=True,
                 )
@@ -381,42 +380,91 @@ def status(ctx: click.Context) -> None:
         else:
             anim_task = None
 
-        relay = RelayClient(
-            gateway_url=config.cloud.gateway_url,
-            hub_id=config.hub_id,
-            api_key=config.cloud.api_key or "",
-        )
-        try:
-            data = await relay.get_status()
-            hubs = data.get("hubs", [])
-            if not hubs:
-                click.echo("  ✗  Cloud relay    No hubs registered.")
-                return
-            for h in hubs:
-                online = h.get("is_online")
-                symbol = "✓" if online else "✗"
-                state = "Online" if online else "Offline"
-                total = h.get("agent_count", 0)
-                active = h.get("active_agent_count", 0)
-                inactive = h.get("inactive_agent_count", 0)
-                click.echo(f"  {symbol}  Cloud relay    {state} (hub {h['hub_id'][:12]}...)")
-                click.echo(f"     Agents:        {total} total  {active} active  {inactive} inactive")
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
-                click.echo("  ✗  Cloud relay    Authentication failed — check your API key.")
-            elif exc.response.status_code == 403:
-                click.echo("  ✗  Cloud relay    Access denied.")
-            else:
-                click.echo(f"  ✗  Cloud relay    Error {exc.response.status_code} from server.")
-        except Exception as exc:
-            click.echo(f"  ✗  Cloud relay    Unreachable ({exc})")
-        finally:
-            if anim_task is not None:
-                stop_event.set()
-                await anim_task
-            await relay.close()
+        # Run local discovery and cloud call concurrently.
+        registry = AgentRegistry(config)
 
-    asyncio.run(_cloud_status())
+        async def _local_scan() -> list:
+            try:
+                return await registry.discover()
+            finally:
+                await registry.close()
+
+        async def _cloud_call() -> dict | None:
+            if config.cloud.api_key is None:
+                return None
+            relay = RelayClient(
+                gateway_url=config.cloud.gateway_url,
+                hub_id=config.hub_id,
+                api_key=config.cloud.api_key or "",
+            )
+            try:
+                return await relay.get_status()
+            finally:
+                await relay.close()
+
+        local_agents, cloud_data = await asyncio.gather(
+            _local_scan(),
+            _cloud_call(),
+            return_exceptions=True,
+        )
+
+        if anim_task is not None:
+            stop_event.set()
+            await anim_task
+
+        # ── Local agents output ───────────────────────────────────────────────
+        if isinstance(local_agents, Exception):
+            click.echo("  ✗  Local agents   Error scanning local agents")
+        else:
+            healthy = [a for a in local_agents if a.healthy]
+            n = len(local_agents)
+            h = len(healthy)
+            if n == 0:
+                click.echo("  –  Local agents   None found")
+            else:
+                click.echo(f"  ✓  Local agents   {n} found  {h} healthy  {n - h} unhealthy")
+                for a in local_agents:
+                    symbol = "✓" if a.healthy else "✗"
+                    click.echo(f"     {symbol}  {a.name}  ({a.url})")
+
+        click.echo("")
+
+        # ── Cloud relay output ────────────────────────────────────────────────
+        if config.cloud.api_key is None:
+            click.echo("     Cloud relay:   No API key — run: hybro-hub start --api-key hybro_...")
+            return
+
+        if isinstance(cloud_data, Exception):
+            exc = cloud_data
+            if isinstance(exc, httpx.HTTPStatusError):
+                if exc.response.status_code == 401:
+                    click.echo("  ✗  Cloud relay    Authentication failed — check your API key.")
+                elif exc.response.status_code == 403:
+                    click.echo("  ✗  Cloud relay    Access denied.")
+                else:
+                    click.echo(f"  ✗  Cloud relay    Error {exc.response.status_code} from server.")
+            else:
+                click.echo(f"  ✗  Cloud relay    Unreachable ({exc})")
+            return
+
+        hubs = cloud_data.get("hubs", []) if cloud_data else []
+        if not hubs:
+            click.echo("  ✗  Cloud relay    No hubs registered.")
+            return
+        for h in hubs:
+            online = h.get("is_online")
+            symbol = "✓" if online else "✗"
+            state = "Online" if online else "Offline"
+            total = h.get("agent_count", 0)
+            active = h.get("active_agent_count", 0)
+            inactive = h.get("inactive_agent_count", 0)
+            click.echo(f"  {symbol}  Cloud relay    {state} (hub {h['hub_id'][:12]}...)")
+            click.echo(
+                f"     Agents:        {total} total  {active} active  {inactive} inactive"
+                "  (cloud view, may lag)"
+            )
+
+    asyncio.run(_full_status())
 
 
 # ──── hybro-hub agents ────
