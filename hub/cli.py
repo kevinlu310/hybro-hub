@@ -682,14 +682,9 @@ def agent_start(
         )
         sys.exit(1)
 
-    # Strip hub-level keys before handing config to the adapter loader.
-    # "port" and "name" are hybro-hub concerns and are not valid constructor
-    # arguments for any a2a-adapter class.
-    # "adapter" is intentionally kept: load_adapter() pops it internally to
-    # determine which class to instantiate.
-    _HUB_KEYS = {"port", "name"}
+    # "port" is hub-only — strip it before passing config to the adapter loader.
     try:
-        adapter = load_adapter({k: v for k, v in config.items() if k not in _HUB_KEYS})
+        adapter = load_adapter({k: v for k, v in config.items() if k != "port"})
     except ImportError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
