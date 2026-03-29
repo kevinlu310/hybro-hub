@@ -124,6 +124,133 @@ class TestDispatchSync:
         assert events[1]["type"] == "processing_status"
         assert events[1]["data"]["status"] == "failed"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_sync_nonterminal_polls_to_completed(self, agent, monkeypatch):
+        """When message/send returns a non-terminal state, polling drives to completion."""
+        import hub.dispatcher as dispatcher_mod
+
+        dispatcher = Dispatcher()
+
+        sync_resp = MagicMock()
+        sync_resp.status_code = 200
+        sync_resp.raise_for_status = MagicMock()
+        sync_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-1",
+                "status": {"state": "submitted"},
+            },
+        }
+
+        poll_resp = MagicMock()
+        poll_resp.status_code = 200
+        poll_resp.raise_for_status = MagicMock()
+        poll_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-1",
+                "status": {
+                    "state": "completed",
+                    "message": {
+                        "role": "agent",
+                        "parts": [{"text": "Polled result"}],
+                    },
+                },
+            },
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(side_effect=[sync_resp, poll_resp])
+        dispatcher._client = mock_client
+
+        original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
+
+        async def fast_poll(self, agent, result, **kwargs):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+
+        monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-poll-001",
+            user_message_id="um-poll-001",
+        ):
+            events.extend(batch)
+
+        assert events[0]["type"] == "agent_response"
+        assert events[0]["data"]["content"] == "Polled result"
+        assert events[1]["type"] == "processing_status"
+        assert events[1]["data"]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_sync_polling_exhausted(self, agent, monkeypatch):
+        """When polling never reaches a terminal state, emit agent_error."""
+        import hub.dispatcher as dispatcher_mod
+
+        dispatcher = Dispatcher()
+
+        sync_resp = MagicMock()
+        sync_resp.status_code = 200
+        sync_resp.raise_for_status = MagicMock()
+        sync_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-stuck",
+                "status": {"state": "working"},
+            },
+        }
+
+        still_working_resp = MagicMock()
+        still_working_resp.status_code = 200
+        still_working_resp.raise_for_status = MagicMock()
+        still_working_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-stuck",
+                "status": {"state": "working"},
+            },
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(
+            side_effect=[sync_resp] + [still_working_resp] * 3,
+        )
+        dispatcher._client = mock_client
+
+        original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
+
+        async def fast_poll(self, agent, result, **kwargs):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+
+        monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-poll-002",
+            user_message_id="um-poll-002",
+        ):
+            events.extend(batch)
+
+        assert events[0]["type"] == "agent_error"
+        assert "PollingTimeout" in events[0]["data"]["error_type"]
+        assert "task-poll-stuck" in events[0]["data"]["error"]
+        assert events[1]["type"] == "processing_status"
+        assert events[1]["data"]["status"] == "failed"
+
 
 class TestJsonRpcBuild:
     def test_build_jsonrpc(self):
