@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.16] - 2026-04-08
+
+### Fixed
+
+- Agent discovery now validates fetched cards with `AgentCard.model_validate()` instead of a manual key check, preventing corrupt or non-agent-card responses from being stored and synced to the cloud
+
+### Changed
+
+- Upgraded `a2a-sdk` dependency to `>=0.3.25,<1`
+- Removed `AGENT_CARD_REQUIRED_KEYS` constant in favour of SDK-native validation
+
 ## [0.1.15] - 2026-03-29
 
 ### Fixed
