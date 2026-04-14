@@ -1,5 +1,6 @@
-"""Allow running the hub as `python -m hub`."""
+"""Allow running the hub CLI via ``python -m hub``."""
 
 from hub.cli import main
 
-main()
+if __name__ == "__main__":
+    main()

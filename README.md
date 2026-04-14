@@ -174,6 +174,42 @@ Gracefully stop the background daemon. Sends `SIGTERM` and waits up to 10 second
 hybro-hub stop
 ```
 
+### `hybro-hub restart`
+
+Stop the running daemon (if any) and start a fresh one. If no daemon is running, starts one directly.
+
+```bash
+hybro-hub restart
+hybro-hub restart --foreground   # restart attached to terminal (useful for debugging)
+```
+
+| Option | Description |
+| --- | --- |
+| `--foreground`, `-f` | After stopping, restart in the foreground (attached to terminal) |
+
+### `hybro-hub update`
+
+Check for and install upgrades to hybro-hub and its dependencies (`a2a-adapter`, `a2a-sdk`). Automatically detects whether you installed with pip, pipx, or uv and runs the correct upgrade command.
+
+```bash
+hybro-hub update              # upgrade all packages
+hybro-hub update --dry-run    # check for updates without installing
+hybro-hub update --restart    # upgrade and restart the daemon
+```
+
+| Option | Description |
+| --- | --- |
+| `--dry-run` | Check for available upgrades without installing |
+| `--restart` | After upgrade, stop the running daemon (if any) and start a fresh one with the new code |
+
+### `hybro-hub --version`
+
+Print the installed version of hybro-hub.
+
+```bash
+hybro-hub --version
+```
+
 ### `hybro-hub status`
 
 Show the state of the local daemon and its connection to the cloud relay.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 from typing import Callable
 
@@ -178,6 +179,210 @@ def _spinning_wait(
     return False
 
 
+# ──── version / upgrade helpers ────
+
+_TRACKED_PACKAGES = ("hybro-hub", "a2a-adapter", "a2a-sdk")
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Parse a PEP 440 release segment (e.g. ``"0.1.16"``) into a comparable tuple."""
+    return tuple(int(x) for x in v.split("."))
+
+
+def _installed_version(pkg: str) -> str | None:
+    import importlib.metadata
+
+    try:
+        return importlib.metadata.version(pkg)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _read_post_upgrade_version(pkg: str) -> str | None:
+    """Read installed version in a fresh process (avoids metadata cache)."""
+    result = subprocess.run(
+        [sys.executable, "-c",
+         f"import importlib.metadata; print(importlib.metadata.version('{pkg}'))"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _query_pypi_versions(packages: tuple[str, ...]) -> dict[str, str | None]:
+    """Query PyPI for the latest version of each package (concurrently)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _fetch(pkg: str) -> tuple[str, str | None]:
+        try:
+            resp = httpx.get(f"https://pypi.org/pypi/{pkg}/json", timeout=10)
+            resp.raise_for_status()
+            return pkg, resp.json()["info"]["version"]
+        except Exception:
+            return pkg, None
+
+    results: dict[str, str | None] = {}
+    with ThreadPoolExecutor(max_workers=len(packages)) as pool:
+        futures = {pool.submit(_fetch, pkg): pkg for pkg in packages}
+        for f in as_completed(futures):
+            pkg, ver = f.result()
+            results[pkg] = ver
+    return results
+
+
+def _detect_installer_command() -> list[str]:
+    """Detect how hybro-hub was installed and return the appropriate upgrade command."""
+    import importlib.metadata
+    import importlib.util
+    import pathlib
+    import shutil
+
+    venv = pathlib.Path(sys.prefix)
+
+    # Priority 0: Editable/dev install — refuse to upgrade
+    try:
+        direct_url = importlib.metadata.distribution("hybro-hub").read_text("direct_url.json")
+        if direct_url and '"editable"' in direct_url:
+            raise click.ClickException(
+                "hybro-hub is installed in editable (development) mode.\n"
+                "Update with: git pull && pip install -e ."
+            )
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    # Priority 1: pipx — venv lives at <pipx_home>/venvs/hybro-hub
+    if venv.name == "hybro-hub" and venv.parent.name == "venvs":
+        pipx = shutil.which("pipx")
+        if pipx:
+            return [pipx, "upgrade", "hybro-hub"]
+
+    # Priority 2: uv tool — venv lives at <data_dir>/uv/tools/hybro-hub
+    if venv.name == "hybro-hub" and venv.parent.name == "tools" and "uv" in str(venv):
+        uv = shutil.which("uv")
+        if uv:
+            return [uv, "tool", "upgrade", "hybro-hub"]
+
+    # Priority 3: conda — refuse with guidance
+    if os.environ.get("CONDA_PREFIX") and "conda" in sys.prefix.lower():
+        raise click.ClickException(
+            "Detected conda environment.\n"
+            "Update with: conda update hybro-hub"
+        )
+
+    # Priority 4: pip (list all 3 packages so transitive deps get upgraded)
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", "--upgrade",
+                "hybro-hub", "a2a-adapter", "a2a-sdk"]
+
+    # Priority 5: uv as pip replacement
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "pip", "install", "--upgrade", "--python", sys.executable,
+                "hybro-hub", "a2a-adapter", "a2a-sdk"]
+
+    # Priority 6: nothing works
+    raise click.ClickException(
+        "Could not find pip, uv, or pipx to perform the upgrade.\n"
+        "Upgrade manually:\n"
+        "  pip install --upgrade hybro-hub\n"
+        "  pipx upgrade hybro-hub\n"
+        "  uv tool upgrade hybro-hub"
+    )
+
+
+def _installer_display_name(cmd: list[str]) -> str:
+    """Derive a human-friendly installer name from a command list."""
+    first = os.path.basename(cmd[0])
+    if "pipx" in first:
+        return "pipx"
+    if "uv" in first:
+        return "uv tool" if "tool" in cmd else "uv"
+    return "pip"
+
+
+# ──── daemon control helpers ────
+
+def _stop_daemon() -> bool:
+    """Stop the running daemon.
+
+    Returns True if a daemon was stopped, False if none was running.
+    Raises click.ClickException for unrecoverable states (e.g. PID belongs to
+    another process).
+    """
+    import signal
+
+    import psutil
+
+    pid = read_lock_pid()
+    if pid is None:
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        _remove_lock_file(pid)
+        return False
+
+    try:
+        cmdline = proc.cmdline()
+        is_hub = any("hybro" in part.lower() or "hub" in part.lower() for part in cmdline)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        _remove_lock_file(pid)
+        return False
+
+    if not is_hub:
+        raise click.ClickException(
+            f"PID {pid} belongs to a different process — lock file is stale.\n"
+            f"Run: rm {LOCK_FILE}"
+        )
+
+    if not sys.stderr.isatty():
+        click.echo(f"Stopping hub daemon (PID {pid})...")
+    proc.send_signal(signal.SIGTERM)
+
+    stopped = _spinning_wait(
+        f"Stopping hub daemon (PID {pid})",
+        check_fn=lambda: not psutil.pid_exists(pid),
+        interval=0.25,
+        timeout=_STOP_TIMEOUT,
+    )
+
+    if stopped:
+        _remove_lock_file(pid)
+        click.echo("Hub daemon stopped.")
+        return True
+
+    click.echo(f"Daemon did not stop after {_STOP_TIMEOUT}s — force killing.")
+    try:
+        proc.kill()
+    except psutil.NoSuchProcess:
+        pass
+    _remove_lock_file(pid)
+    click.echo("Hub daemon killed.")
+    return True
+
+
+def _spawn_start(foreground: bool = False) -> bool:
+    """Spawn ``hybro-hub start`` as a subprocess.
+
+    Returns True if the daemon appears to have started successfully.
+    stdout/stderr are inherited so the user sees output directly.
+    """
+    import time
+
+    cmd = [sys.executable, "-m", "hub", "start"]
+    if foreground:
+        cmd.append("--foreground")
+        subprocess.run(cmd)
+        return True
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        return False
+
+    time.sleep(0.5)
+    return read_lock_pid() is not None
+
+
 def _detach_windows() -> None:
     """Re-launch the current command as a detached background process (Windows only).
 
@@ -185,8 +390,6 @@ def _detach_windows() -> None:
     should run as the daemon instead of spawning yet another child.
     stdout/stderr of the child are redirected to the log file.
     """
-    import subprocess
-
     DETACHED_PROCESS = 0x00000008
     CREATE_NO_WINDOW = 0x08000000
 
@@ -244,6 +447,11 @@ def _daemonize() -> None:
 
 
 @click.group()
+@click.version_option(
+    version=None,
+    package_name="hybro-hub",
+    prog_name="hybro-hub",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging.")
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
@@ -333,62 +541,127 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
 @main.command()
 def stop() -> None:
     """Stop the running hub daemon."""
-    import signal
-
-    import psutil
-
-    pid = read_lock_pid()
-    if pid is None:
+    try:
+        was_running = _stop_daemon()
+    except click.ClickException:
+        raise
+    if not was_running:
         click.echo("Hub daemon is not running.")
-        sys.exit(0)
 
-    try:
-        proc = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        click.echo(f"Hub daemon is not running (stale PID {pid} — cleaning up).")
-        _remove_lock_file(pid)
-        sys.exit(0)
 
-    # Guard against stale PID reuse: verify the process looks like hybro-hub.
-    try:
-        cmdline = proc.cmdline()
-        is_hub = any("hybro" in part.lower() or "hub" in part.lower() for part in cmdline)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        click.echo(f"Hub daemon is not running (stale PID {pid} — cleaning up).")
-        _remove_lock_file(pid)
-        sys.exit(0)
+# ──── hybro-hub restart ────
 
-    if not is_hub:
+@main.command()
+@click.option(
+    "--foreground", "-f", is_flag=True,
+    help="After stopping, restart in the foreground (attached to terminal).",
+)
+def restart(foreground: bool) -> None:
+    """Restart the hub daemon (stop + start)."""
+    was_running = _stop_daemon()
+    if not was_running:
+        click.echo("Hub daemon is not running — starting fresh.")
+    ok = _spawn_start(foreground=foreground)
+    if not ok:
         click.echo(
-            f"PID {pid} belongs to a different process — lock file is stale.\n"
-            f"Run: rm {LOCK_FILE}"
+            "Warning: daemon may not have started. Check: hybro-hub status",
+            err=True,
         )
+
+
+# ──── hybro-hub update ────
+
+@main.command()
+@click.option("--dry-run", is_flag=True, help="Check for available upgrades without installing.")
+@click.option("--restart", "do_restart", is_flag=True,
+              help="After upgrade, restart the daemon with the new code.")
+def update(dry_run: bool, do_restart: bool) -> None:
+    """Check for and install upgrades to hybro-hub and its dependencies."""
+    # 1. Read installed versions
+    installed = {pkg: _installed_version(pkg) for pkg in _TRACKED_PACKAGES}
+
+    click.echo("Current versions:")
+    for pkg, ver in installed.items():
+        click.echo(f"  {pkg:14s} {ver or 'not installed'}")
+    click.echo()
+
+    # 2. Query PyPI for latest versions
+    latest = _query_pypi_versions(_TRACKED_PACKAGES)
+    pypi_reachable = any(v is not None for v in latest.values())
+
+    if not pypi_reachable:
+        click.echo("Warning: could not reach PyPI to check latest versions.", err=True)
+        if dry_run:
+            click.echo("Cannot determine available upgrades offline.")
+            return
+        click.echo("Attempting upgrade anyway...\n")
+    else:
+        # 3. Compare
+        upgrades: dict[str, tuple[str, str]] = {}
+        for pkg in _TRACKED_PACKAGES:
+            cur = installed.get(pkg)
+            lat = latest.get(pkg)
+            if cur and lat:
+                try:
+                    if _parse_version(lat) > _parse_version(cur):
+                        upgrades[pkg] = (cur, lat)
+                except ValueError:
+                    pass
+
+        if not upgrades:
+            click.echo("Everything is up to date.")
+            return
+
+        click.echo("Available upgrades:")
+        for pkg, (cur, lat) in upgrades.items():
+            click.echo(f"  {pkg:14s} {cur} \u2192 {lat}")
+        click.echo()
+
+        if dry_run:
+            return
+
+    # 5. Detect installer
+    cmd = _detect_installer_command()
+    click.echo(f"Upgrading with {_installer_display_name(cmd)}...")
+
+    # 6. Run upgrade subprocess
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        click.echo(f"Upgrade failed (exit code {result.returncode}).", err=True)
+        if result.stderr:
+            click.echo(result.stderr.rstrip(), err=True)
+        if "Permission denied" in (result.stderr or ""):
+            click.echo("\nTry: sudo hybro-hub update", err=True)
+        else:
+            click.echo(f"\nManual upgrade: {' '.join(cmd)}", err=True)
         sys.exit(1)
 
-    if not sys.stderr.isatty():
-        click.echo(f"Stopping hub daemon (PID {pid})...")
-    proc.send_signal(signal.SIGTERM)
+    # 8. Print diff
+    click.echo("\u2713 Upgrade complete.\n")
+    for pkg in _TRACKED_PACKAGES:
+        old = installed.get(pkg) or "?"
+        new = _read_post_upgrade_version(pkg) or "?"
+        if old != new:
+            click.echo(f"  {pkg:14s} {new} (was {old})")
+        else:
+            click.echo(f"  {pkg:14s} {new} (unchanged)")
+    click.echo()
 
-    stopped = _spinning_wait(
-        f"Stopping hub daemon (PID {pid})",
-        check_fn=lambda: not psutil.pid_exists(pid),
-        interval=0.25,
-        timeout=_STOP_TIMEOUT,
-    )
-
-    if stopped:
-        _remove_lock_file(pid)
-        click.echo("Hub daemon stopped.")
-        return
-
-    # Still alive — force kill
-    click.echo(f"Daemon did not stop after {_STOP_TIMEOUT}s — force killing.")
-    try:
-        proc.kill()
-    except psutil.NoSuchProcess:
-        pass
-    _remove_lock_file(pid)
-    click.echo("Hub daemon killed.")
+    # 9-10. Restart handling
+    if do_restart:
+        was_running = _stop_daemon()
+        if not was_running:
+            click.echo("Hub daemon was not running — starting fresh.")
+        ok = _spawn_start()
+        if not ok:
+            click.echo(
+                "Warning: daemon may not have started. Check: hybro-hub status",
+                err=True,
+            )
+    elif read_lock_pid() is not None:
+        click.echo("The hub daemon is running. Restart to use the new version:")
+        click.echo("  hybro-hub restart")
 
 
 # ──── hybro-hub status ────
