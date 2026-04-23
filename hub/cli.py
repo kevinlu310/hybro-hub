@@ -903,6 +903,10 @@ _CLI_ADAPTERS = {
         "description": "OpenAI Codex CLI coding agent",
         "install_hint": "pip install a2a-adapter",
     },
+    "hermes": {
+        "description": "Hermes Agent (tools, memory) via gateway pattern",
+        "install_hint": "pip install a2a-adapter",
+    },
 }
 
 
@@ -968,6 +972,13 @@ def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434")
 @click.option("--working-dir", default=None, help="[claude-code/codex] Working directory for the agent.")
 @click.option("--claude-path", default=None, help="[claude-code] Path to claude binary.")
 @click.option("--codex-path", default=None, help="[codex] Path to codex binary.")
+@click.option("--provider", default=None, help="[hermes] LLM provider override (optional).")
+@click.option(
+    "--enabled-toolsets",
+    "enabled_toolsets",
+    default=None,
+    help="[hermes] Comma-separated toolsets (default: hermes-cli).",
+)
 @click.option("--timeout", default=None, type=int, help="Request timeout in seconds.")
 @click.pass_context
 def agent_start(
@@ -985,11 +996,13 @@ def agent_start(
     working_dir: str | None,
     claude_path: str | None,
     codex_path: str | None,
+    provider: str | None,
+    enabled_toolsets: str | None,
     timeout: int | None,
 ) -> None:
     """Start a local A2A agent adapter.
 
-    Supported adapters: claude-code, codex, ollama, openclaw, n8n.
+    Supported adapters: claude-code, codex, hermes, ollama, openclaw, n8n.
 
     \b
     CLI flags are a convenience shortcut for common parameters.
@@ -1004,6 +1017,8 @@ def agent_start(
       hybro-hub agent start ollama --model mistral:7b --port 10020
       hybro-hub agent start openclaw --thinking medium
       hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/agent
+      hybro-hub agent start hermes
+      hybro-hub agent start hermes --model anthropic/claude-sonnet-4
       hybro-hub agent start --config hybro-agent.yaml
     """
     # Mutual-exclusion guard and auto-discovery
@@ -1048,6 +1063,11 @@ def agent_start(
             config["claude_path"] = claude_path
         if codex_path:
             config["codex_path"] = codex_path
+        if provider:
+            config["provider"] = provider
+        if enabled_toolsets:
+            ts = [s.strip() for s in enabled_toolsets.split(",") if s.strip()]
+            config["enabled_toolsets"] = ts if ts else ["hermes-cli"]
         adapter_type_display = config["adapter"]
         effective_port = config.get("port", port)
     else:
@@ -1118,6 +1138,23 @@ def agent_start(
             if timeout:
                 config["timeout"] = timeout
 
+        elif adapter_type == "hermes":
+            config["name"] = agent_name or "Hermes Agent"
+            config["description"] = (
+                "Hermes AI agent — tool use, persistent memory, streaming"
+            )
+            if model:
+                config["model"] = model
+            if provider:
+                config["provider"] = provider
+            if enabled_toolsets:
+                ts = [s.strip() for s in enabled_toolsets.split(",") if s.strip()]
+                config["enabled_toolsets"] = ts if ts else ["hermes-cli"]
+            else:
+                config["enabled_toolsets"] = ["hermes-cli"]
+            if timeout:
+                config["timeout"] = timeout
+
     try:
         from a2a_adapter import serve_agent
         from a2a_adapter.loader import load_adapter
@@ -1152,6 +1189,13 @@ def agent_start(
         click.echo(f"  Webhook: {wh}")
     elif adapter_type_display in ("claude-code", "codex"):
         click.echo(f"  Working dir: {config['working_dir']}")
+    elif adapter_type_display == "hermes":
+        m = config.get("model")
+        click.echo(f"  Model:    {m if m else '(from Hermes ~/.hermes/config.yaml)'}")
+        ts = config.get("enabled_toolsets") or ["hermes-cli"]
+        click.echo(f"  Toolsets: {', '.join(ts)}")
+        if config.get("provider"):
+            click.echo(f"  Provider: {config['provider']}")
     if config_path:
         click.echo(f"  Config:  {config_path}")
     click.echo("")

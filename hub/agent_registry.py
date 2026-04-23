@@ -33,10 +33,12 @@ from .config import HubConfig
 
 logger = logging.getLogger(__name__)
 
-# Well-known agent card paths to probe during discovery
+# Legacy path used by older A2A deployments (removed from a2a-sdk re-exports).
+_LEGACY_AGENT_CARD_WELL_KNOWN_PATH = "/.well-known/agent.json"
+
 AGENT_CARD_PATHS = [
-    AGENT_CARD_WELL_KNOWN_PATH,       # /.well-known/agent-card.json
-    "/.well-known/agent.json",        # Legacy path for older agents
+    AGENT_CARD_WELL_KNOWN_PATH,  # /.well-known/agent-card.json
+    _LEGACY_AGENT_CARD_WELL_KNOWN_PATH,
 ]
 DISCOVERY_TIMEOUT = 3
 
