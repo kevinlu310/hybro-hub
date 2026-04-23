@@ -190,6 +190,11 @@ _V10_ROLE_MAP: dict[str, str] = {
     "ROLE_AGENT": "agent",
 }
 
+_V10_ROLE_ENCODE_MAP: dict[str, str] = {
+    "user": "ROLE_USER",
+    "agent": "ROLE_AGENT",
+}
+
 
 def get_method_name(base_method: str, version: str) -> str:
     """Map a canonical method name to the versioned JSON-RPC method string."""
@@ -215,6 +220,28 @@ def normalize_task_state(state: str) -> str:
 def normalize_role(role: str) -> str:
     """Normalize a role to canonical lowercase."""
     return _V10_ROLE_MAP.get(role, role)
+
+
+def build_role(role: str, version: str) -> str:
+    """Encode a canonical lowercase role for the target protocol version."""
+    canonical = normalize_role(role)
+    if version == "1.0":
+        return _V10_ROLE_ENCODE_MAP.get(canonical, role)
+    return canonical
+
+
+def build_configuration(
+    configuration: dict[str, Any],
+    version: str,
+) -> dict[str, Any]:
+    """Encode request configuration for the target protocol version."""
+    if version != "1.0":
+        return dict(configuration)
+
+    cfg = dict(configuration)
+    if "blocking" in cfg and "returnImmediately" not in cfg:
+        cfg["returnImmediately"] = not bool(cfg.pop("blocking"))
+    return cfg
 
 
 def build_message_parts(parts: list[dict], version: str) -> list[dict]:
@@ -309,11 +336,16 @@ def build_request_params(
 ) -> dict[str, Any]:
     """Build JSON-RPC params for a message send/stream request."""
     msg = dict(message_dict)
+    if version == "1.0":
+        msg.pop("kind", None)
+    if "role" in msg:
+        msg["role"] = build_role(msg["role"], version)
     if "parts" in msg:
-        msg["parts"] = build_message_parts(msg["parts"], version)
+        canonical_parts = normalize_inbound_parts(msg["parts"], version)
+        msg["parts"] = build_message_parts(canonical_parts, version)
     params: dict[str, Any] = {"message": msg}
     if configuration:
-        params["configuration"] = configuration
+        params["configuration"] = build_configuration(configuration, version)
     return params
 
 

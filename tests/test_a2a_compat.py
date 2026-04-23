@@ -577,6 +577,30 @@ class TestBuildRequestParams:
         assert params["message"]["parts"] == [{"text": "hi"}]
         assert "configuration" not in params
 
+    def test_v10_strips_top_level_kind_from_message(self):
+        msg = {
+            "kind": "message",
+            "role": "user",
+            "parts": [{"text": "hi"}],
+            "messageId": "m1",
+        }
+        params = build_request_params(msg, "1.0")
+        assert "kind" not in params["message"]
+
+    def test_v10_strips_v03_kind_from_parts(self):
+        msg = {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "hi"}],
+            "messageId": "m1",
+        }
+        params = build_request_params(msg, "1.0")
+        assert params["message"]["parts"] == [{"text": "hi"}]
+
+    def test_v10_encodes_role_enum(self):
+        msg = {"role": "user", "parts": [{"text": "hi"}], "messageId": "m1"}
+        params = build_request_params(msg, "1.0")
+        assert params["message"]["role"] == "ROLE_USER"
+
     def test_v03_adds_kind_to_parts(self):
         msg = {"role": "user", "parts": [{"text": "hi"}], "messageId": "m1"}
         params = build_request_params(msg, "0.3")
@@ -585,7 +609,7 @@ class TestBuildRequestParams:
     def test_with_configuration(self):
         msg = {"role": "user", "parts": [{"text": "hi"}]}
         params = build_request_params(msg, "1.0", configuration={"blocking": True})
-        assert params["configuration"] == {"blocking": True}
+        assert params["configuration"] == {"returnImmediately": False}
 
     def test_does_not_mutate_original(self):
         msg = {"role": "user", "parts": [{"text": "hi"}]}

@@ -924,8 +924,144 @@ class TestV10MethodRouting:
         assert sent_body["method"] == "SendMessage"
         assert sent_body["_url"] == "http://localhost:9001/a2a"
         assert sent_body["_headers"]["A2A-Version"] == "1.0"
+        assert sent_body["params"]["configuration"] == {"returnImmediately": False}
         assert events[0]["type"] == "agent_response"
         assert events[0]["data"]["content"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_v10_sync_strips_top_level_message_kind(self, v10_agent):
+        sent_body = {}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "task": {
+                    "id": "t-1",
+                    "status": {
+                        "state": "TASK_STATE_COMPLETED",
+                        "message": {"role": "ROLE_AGENT", "parts": [{"text": "done"}]},
+                    },
+                },
+            },
+        }
+
+        async def fake_post(url, *, json, headers, **kwargs):
+            sent_body.update(json)
+            return mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        message = dict(SAMPLE_MESSAGE)
+        message["kind"] = "message"
+
+        async for _ in dispatcher.dispatch(
+            agent=v10_agent,
+            message_dict=message,
+            agent_message_id="am-v10-kind",
+            user_message_id="um-kind",
+        ):
+            pass
+
+        assert "kind" not in sent_body["params"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_v10_sync_strips_v03_kind_from_parts(self, v10_agent):
+        sent_body = {}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "task": {
+                    "id": "t-1",
+                    "status": {
+                        "state": "TASK_STATE_COMPLETED",
+                        "message": {"role": "ROLE_AGENT", "parts": [{"text": "done"}]},
+                    },
+                },
+            },
+        }
+
+        async def fake_post(url, *, json, headers, **kwargs):
+            sent_body.update(json)
+            return mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        message = {
+            "messageId": "msg-123",
+            "role": "user",
+            "parts": [{"kind": "text", "text": "Hello agent"}],
+        }
+
+        async for _ in dispatcher.dispatch(
+            agent=v10_agent,
+            message_dict=message,
+            agent_message_id="am-v10-part-kind",
+            user_message_id="um-part-kind",
+        ):
+            pass
+
+        assert sent_body["params"]["message"]["parts"] == [{"text": "Hello agent"}]
+
+    @pytest.mark.asyncio
+    async def test_v10_sync_encodes_role_enum(self, v10_agent):
+        sent_body = {}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "task": {
+                    "id": "t-1",
+                    "status": {
+                        "state": "TASK_STATE_COMPLETED",
+                        "message": {"role": "ROLE_AGENT", "parts": [{"text": "done"}]},
+                    },
+                },
+            },
+        }
+
+        async def fake_post(url, *, json, headers, **kwargs):
+            sent_body.update(json)
+            return mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        async for _ in dispatcher.dispatch(
+            agent=v10_agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-v10-role",
+            user_message_id="um-role",
+        ):
+            pass
+
+        assert sent_body["params"]["message"]["role"] == "ROLE_USER"
 
     @pytest.mark.asyncio
     async def test_v10_cancel_uses_canceltask(self, v10_agent):
