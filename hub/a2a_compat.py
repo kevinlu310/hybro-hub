@@ -1,20 +1,20 @@
-"""
-A2A v0.3/v1.0 protocol compatibility layer
+# hub/a2a_compat.py
+"""A2A v0.3/v1.0 protocol compatibility layer.
 
-Provides unified interface selection, request/response transformation,
-and automatic fallback for dual-protocol agent cards.
+Encapsulates all version-specific differences so that dispatcher.py
+and agent_registry.py only call into this module for protocol decisions.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-# ============================================================================
-# Task 1: Core Data Types
-# ============================================================================
 
 @dataclass(frozen=True)
 class ResolvedInterface:
-    """Resolved JSON-RPC interface for an agent"""
+    """A resolved JSON-RPC interface from an agent card."""
+
     binding: str
     protocol_version: str
     url: str
@@ -22,414 +22,429 @@ class ResolvedInterface:
 
 @dataclass(frozen=True)
 class JsonRpcError:
-    """JSON-RPC error details"""
+    """A structured JSON-RPC error extracted from a response."""
+
     code: int
     message: str
     data: Any = None
 
 
 class A2AVersionFallbackError(Exception):
-    """Raised when version fallback should be attempted"""
-    pass
+    """Raised when a v1.0 dispatch gets a fallback-eligible JSON-RPC error."""
 
 
-# Error codes that are eligible for fallback
 FALLBACK_ELIGIBLE_CODES: set[int] = {-32601, -32009}
 
-# Canonical terminal states for tasks
-CANONICAL_TERMINAL_STATES: set[str] = {"completed", "failed", "canceled", "rejected"}
+CANONICAL_TERMINAL_STATES: set[str] = {
+    "completed", "failed", "canceled", "rejected",
+}
 
-
-# ============================================================================
-# Task 2: Card Validation
-# ============================================================================
 
 def validate_agent_card(card_data: dict) -> dict | None:
+    """Validate an agent card, trying v1.0 first, then falling back to v0.3.
+
+    Returns the card dict if valid, None if neither schema accepts it.
+    Both parsers tolerate unknown/vendor fields for forward compatibility.
+    Protobuf ParseDict accepts almost anything with ignore_unknown_fields,
+    so we also check that the parsed card has a non-empty name.
     """
-    Validates an agent card against v1.0 protobuf schema, then v0.3 pydantic.
-    Returns card_data if valid, None otherwise.
-    """
-    # Basic validation: require name and capabilities
-    if not isinstance(card_data, dict):
-        return None
-    if "name" not in card_data or "capabilities" not in card_data:
-        return None
-    if not isinstance(card_data["capabilities"], dict):
-        return None
+    # Try v1.0 (protobuf ParseDict)
+    try:
+        from google.protobuf.json_format import ParseDict
+        from a2a.types import AgentCard
 
-    # Additional validation could be added here (protobuf/pydantic)
-    # but for now we accept any card with name and capabilities
-    return card_data
+        parsed = ParseDict(card_data, AgentCard(), ignore_unknown_fields=True)
+        if parsed.name:
+            return card_data
+    except Exception:
+        pass
 
+    # Fall back to v0.3 (Pydantic model_validate)
+    try:
+        from a2a.compat.v0_3.types import AgentCard as V03AgentCard
 
-# ============================================================================
-# Task 3: Interface Selection
-# ============================================================================
+        V03AgentCard.model_validate(card_data)
+        return card_data
+    except Exception:
+        pass
+
+    return None
+
 
 _SUPPORTED_VERSIONS: set[str] = {"0.3", "1.0"}
 
 
 def select_interface(card: dict) -> ResolvedInterface:
-    """
-    Selects the best JSON-RPC interface from an agent card.
+    """Select the best JSON-RPC interface from an agent card.
 
-    Prefers v1.0 over v0.3. If supportedInterfaces is present but contains
-    no supported versions, raises ValueError. Only falls back to top-level
-    url when supportedInterfaces is entirely absent.
+    For v1.0 cards with supportedInterfaces: filter to JSONRPC, prefer v1.0.
+    Only accepts versions in _SUPPORTED_VERSIONS (0.3, 1.0); interfaces
+    advertising unsupported versions (e.g. 1.1, 2.0) are skipped.
+    For v0.3 cards (no supportedInterfaces at all): use top-level url as v0.3.
+    Raises ValueError if no usable JSON-RPC interface found.
+
+    Important: the top-level url fallback is ONLY used when supportedInterfaces
+    is absent. If supportedInterfaces is present but contains no supported
+    versions (e.g. all 2.0), this raises ValueError rather than silently
+    degrading to v0.3 via top-level url.
     """
     interfaces = card.get("supportedInterfaces", None)
 
     if interfaces is not None:
-        # supportedInterfaces is present - only look there
-        # But treat empty list as "no interfaces" and fall back
-        if len(interfaces) == 0:
-            # Empty list: fall back to top-level url
-            if "url" in card:
-                return ResolvedInterface(
-                    binding="json-rpc",
-                    protocol_version="0.3",
-                    url=card["url"]
-                )
-            raise ValueError("No JSON-RPC interface found")
+        jsonrpc: list[ResolvedInterface] = []
+        for iface in interfaces:
+            if iface.get("protocolBinding", "") != "JSONRPC":
+                continue
+            url = iface.get("url", "")
+            if not url:
+                continue
+            pv = iface.get("protocolVersion", "0.3")
+            if pv not in _SUPPORTED_VERSIONS:
+                continue
+            jsonrpc.append(ResolvedInterface(binding="JSONRPC", protocol_version=pv, url=url))
 
-        for version in ["1.0", "0.3"]:
-            for iface in interfaces:
-                if (iface.get("binding") == "json-rpc" and
-                    iface.get("protocolVersion") == version):
-                    return ResolvedInterface(
-                        binding="json-rpc",
-                        protocol_version=version,
-                        url=iface["url"]
-                    )
-        # supportedInterfaces present but no usable interface
-        raise ValueError("supportedInterfaces present but no usable JSON-RPC interface")
+        if jsonrpc:
+            for target in ("1.0", "0.3"):
+                for ri in jsonrpc:
+                    if ri.protocol_version == target:
+                        return ri
+            return jsonrpc[0]
 
-    # supportedInterfaces absent - fall back to top-level url
-    if "url" in card:
-        return ResolvedInterface(
-            binding="json-rpc",
-            protocol_version="0.3",
-            url=card["url"]
+        raise ValueError(
+            "supportedInterfaces present but no usable JSON-RPC interface "
+            f"(supported versions: {_SUPPORTED_VERSIONS})"
         )
 
-    raise ValueError("No JSON-RPC interface found")
+    url = card.get("url", "")
+    if url:
+        return ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url=url)
+
+    raise ValueError("No usable JSON-RPC interface in agent card")
 
 
-def select_fallback_interface(card: dict, primary: ResolvedInterface) -> ResolvedInterface | None:
+def select_fallback_interface(
+    card: dict, primary: ResolvedInterface,
+) -> ResolvedInterface | None:
+    """Select a v0.3 fallback interface for retry after v1.0 failure.
+
+    Returns None if primary is already v0.3 (no fallback needed).
+    For dual-mode cards: returns the v0.3 JSONRPC URL from the card.
+    For single-interface v1.0 cards: synthesizes fallback at the same URL.
     """
-    Selects a fallback interface with a different protocol version.
-    Returns None if no alternative exists.
-    """
-    interfaces = card.get("supportedInterfaces", [])
+    if primary.protocol_version == "0.3":
+        return None
 
-    for version in _SUPPORTED_VERSIONS:
-        if version == primary.protocol_version:
+    for iface in card.get("supportedInterfaces", []):
+        if iface.get("protocolBinding", "") != "JSONRPC":
             continue
-        for iface in interfaces:
-            if (iface.get("binding") == "json-rpc" and
-                iface.get("protocolVersion") == version):
-                return ResolvedInterface(
-                    binding="json-rpc",
-                    protocol_version=version,
-                    url=iface["url"]
-                )
+        pv = iface.get("protocolVersion", "0.3")
+        url = iface.get("url", "")
+        if pv == "0.3" and url:
+            return ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url=url)
 
-    return None
+    return ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url=primary.url)
 
 
-# ============================================================================
-# Task 4: Wire Format Mapping
-# ============================================================================
+_METHOD_MAP_V03: dict[str, str] = {
+    "send": "message/send",
+    "stream": "message/stream",
+    "get_task": "tasks/get",
+    "cancel_task": "tasks/cancel",
+}
 
-_V03_METHOD_MAP = {
-    "SendMessage": "message/send",
-    "SendStreamingMessage": "message/stream",
-    "GetTask": "tasks/get",
-    "CancelTask": "tasks/cancel",
+_METHOD_MAP_V10: dict[str, str] = {
+    "send": "SendMessage",
+    "stream": "SendStreamingMessage",
+    "get_task": "GetTask",
+    "cancel_task": "CancelTask",
+}
+
+_V10_STATE_MAP: dict[str, str] = {
+    "TASK_STATE_SUBMITTED": "submitted",
+    "TASK_STATE_WORKING": "working",
+    "TASK_STATE_COMPLETED": "completed",
+    "TASK_STATE_FAILED": "failed",
+    "TASK_STATE_CANCELED": "canceled",
+    "TASK_STATE_REJECTED": "rejected",
+    "TASK_STATE_INPUT_REQUIRED": "input-required",
+    "TASK_STATE_AUTH_REQUIRED": "auth-required",
+}
+
+_V10_ROLE_MAP: dict[str, str] = {
+    "ROLE_USER": "user",
+    "ROLE_AGENT": "agent",
 }
 
 
 def get_method_name(base_method: str, version: str) -> str:
-    """
-    Maps canonical method names to version-specific wire format.
-    Raises ValueError for unsupported versions.
-    """
-    if version not in {"0.3", "1.0"}:
-        raise ValueError(f"Unsupported protocol version: {version}")
-
+    """Map a canonical method name to the versioned JSON-RPC method string."""
+    if version == "1.0":
+        return _METHOD_MAP_V10[base_method]
     if version == "0.3":
-        return _V03_METHOD_MAP.get(base_method, base_method)
-    return base_method
+        return _METHOD_MAP_V03[base_method]
+    raise ValueError(f"Unsupported protocol version: {version}")
 
 
 def get_headers(version: str) -> dict[str, str]:
-    """Returns protocol headers for the given version"""
+    """Return extra HTTP headers for the given protocol version."""
     if version == "1.0":
         return {"A2A-Version": "1.0"}
     return {}
 
 
 def normalize_task_state(state: str) -> str:
-    """Normalizes SCREAMING_SNAKE task states to lowercase canonical"""
-    state = state.lower()
-    # Strip TASK_STATE_ prefix if present
-    if state.startswith("task_state_"):
-        state = state[11:]
-    return state
+    """Normalize a task state to canonical lowercase."""
+    return _V10_STATE_MAP.get(state, state)
 
 
 def normalize_role(role: str) -> str:
-    """Normalizes ROLE_USER/ROLE_AGENT to lowercase canonical"""
-    role = role.lower()
-    if role.startswith("role_"):
-        role = role[5:]
-    return role
+    """Normalize a role to canonical lowercase."""
+    return _V10_ROLE_MAP.get(role, role)
 
-
-# ============================================================================
-# Task 5: Part Conversion
-# ============================================================================
 
 def build_message_parts(parts: list[dict], version: str) -> list[dict]:
+    """Convert canonical (flattened) parts to the target version's wire format.
+
+    Canonical format matches v1.0: {"text": "..."}, {"url": "..."}, {"data": {...}}.
+    For v0.3: adds `kind` discriminator, nests file fields under `file` key,
+    renames mediaType->mimeType, filename->name, url->uri, raw->bytes.
     """
-    Converts canonical parts to version-specific wire format.
+    if version != "0.3":
+        return parts
 
-    For v0.3: adds kind field and nests file fields.
-    For v1.0: renames mediaType to mimeType.
-    """
-    result = []
-
-    for part in parts:
-        if version == "0.3":
-            # v0.3 requires kind and nested file structure
-            if "text" in part:
-                wire_part = {"kind": "text", **part}
-            elif "url" in part or "raw" in part:
-                wire_part = {"kind": "file", "file": {}}
-                if "url" in part:
-                    wire_part["file"]["uri"] = part["url"]
-                if "raw" in part:
-                    wire_part["file"]["bytes"] = part["raw"]
-                if "mediaType" in part:
-                    wire_part["file"]["mimeType"] = part["mediaType"]
-                if "filename" in part:
-                    wire_part["file"]["name"] = part["filename"]
-            else:
-                wire_part = part.copy()
-            result.append(wire_part)
-        else:  # v1.0
-            # v1.0 uses flat structure with mimeType
-            wire_part = part.copy()
-            if "mediaType" in wire_part:
-                wire_part["mimeType"] = wire_part.pop("mediaType")
-            result.append(wire_part)
-
+    result: list[dict] = []
+    for p in parts:
+        if "text" in p:
+            out: dict[str, Any] = {"kind": "text", "text": p["text"]}
+            if "metadata" in p:
+                out["metadata"] = p["metadata"]
+            result.append(out)
+        elif "url" in p:
+            file_dict: dict[str, Any] = {"uri": p["url"]}
+            if "mediaType" in p:
+                file_dict["mimeType"] = p["mediaType"]
+            if "filename" in p:
+                file_dict["name"] = p["filename"]
+            result.append({"kind": "file", "file": file_dict})
+        elif "raw" in p:
+            file_dict = {"bytes": p["raw"]}
+            if "mediaType" in p:
+                file_dict["mimeType"] = p["mediaType"]
+            if "filename" in p:
+                file_dict["name"] = p["filename"]
+            result.append({"kind": "file", "file": file_dict})
+        elif "data" in p:
+            out = {"kind": "data", "data": p["data"]}
+            if "metadata" in p:
+                out["metadata"] = p["metadata"]
+            result.append(out)
+        else:
+            result.append(p)
     return result
 
 
 def normalize_inbound_parts(parts: list[dict], version: str) -> list[dict]:
+    """Normalize inbound wire parts to canonical (flattened) format.
+
+    For v0.3: strips `kind`, unnests file fields, renames mimeType->mediaType,
+    name->filename, uri->url, bytes->raw.
+    For v1.0: strips stale `kind` if present, renames mimeType->mediaType.
     """
-    Normalizes wire format parts to canonical form.
-
-    For v0.3: strips kind, unnests file fields, renames fields.
-    For v1.0: strips stale kind if present, renames mimeType to mediaType.
-    """
-    result = []
-
-    for part in parts:
-        canonical_part = {}
-
-        if version == "0.3":
-            # Check if part has kind (structured format)
-            if "kind" in part:
-                kind = part["kind"]
-                if kind == "text":
-                    canonical_part = {k: v for k, v in part.items() if k != "kind"}
-                elif kind == "file" and "file" in part:
-                    # Unnest file structure
-                    file_obj = part["file"]
-                    if "uri" in file_obj:
-                        canonical_part["url"] = file_obj["uri"]
-                    if "bytes" in file_obj:
-                        canonical_part["raw"] = file_obj["bytes"]
-                    if "mimeType" in file_obj:
-                        canonical_part["mediaType"] = file_obj["mimeType"]
-                    if "name" in file_obj:
-                        canonical_part["filename"] = file_obj["name"]
-                else:
-                    canonical_part = {k: v for k, v in part.items() if k != "kind"}
-            else:
-                # Flat part without kind - just rename fields
-                canonical_part = part.copy()
-                if "uri" in canonical_part:
-                    canonical_part["url"] = canonical_part.pop("uri")
-                if "bytes" in canonical_part:
-                    canonical_part["raw"] = canonical_part.pop("bytes")
-                if "mimeType" in canonical_part:
-                    canonical_part["mediaType"] = canonical_part.pop("mimeType")
-                if "name" in canonical_part:
-                    canonical_part["filename"] = canonical_part.pop("name")
-        else:  # v1.0
-            # v1.0 parts should be flat, but strip kind if present
-            canonical_part = {k: v for k, v in part.items() if k != "kind"}
-            # Rename mimeType to mediaType
-            if "mimeType" in canonical_part:
-                canonical_part["mediaType"] = canonical_part.pop("mimeType")
-
-        result.append(canonical_part)
-
+    result: list[dict] = []
+    for p in parts:
+        kind = p.get("kind", "")
+        if kind == "text":
+            out: dict[str, Any] = {"text": p["text"]}
+            if "metadata" in p:
+                out["metadata"] = p["metadata"]
+            result.append(out)
+        elif kind == "file":
+            f = p.get("file", {})
+            out = {}
+            if "uri" in f:
+                out["url"] = f["uri"]
+            if "bytes" in f:
+                out["raw"] = f["bytes"]
+            if "mimeType" in f:
+                out["mediaType"] = f["mimeType"]
+            if "name" in f:
+                out["filename"] = f["name"]
+            result.append(out)
+        elif kind == "data":
+            out = {"data": p["data"]}
+            if "metadata" in p:
+                out["metadata"] = p["metadata"]
+            result.append(out)
+        elif kind:
+            result.append(p)
+        else:
+            out = dict(p)
+            if "kind" in out:
+                del out["kind"]
+            if "mimeType" in out:
+                out["mediaType"] = out.pop("mimeType")
+            result.append(out)
     return result
 
 
-# ============================================================================
-# Task 6: Request Params
-# ============================================================================
-
-def build_request_params(message_dict: dict, version: str, configuration: dict | None = None) -> dict:
-    """
-    Builds JSON-RPC params from canonical message dict.
-    Applies part conversion for the target version.
-    """
-    params = {}
-
-    # Convert parts if present
-    msg = message_dict.copy()
+def build_request_params(
+    message_dict: dict,
+    version: str,
+    configuration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build JSON-RPC params for a message send/stream request."""
+    msg = dict(message_dict)
     if "parts" in msg:
         msg["parts"] = build_message_parts(msg["parts"], version)
-
-    params["message"] = msg
-
-    if configuration is not None:
+    params: dict[str, Any] = {"message": msg}
+    if configuration:
         params["configuration"] = configuration
-
     return params
 
 
-# ============================================================================
-# Task 7: Response Extraction
-# ============================================================================
-
 def extract_response(raw: dict, version: str) -> dict:
+    """Normalize a JSON-RPC response to canonical format.
+
+    Both v0.3 and v1.0 responses are normalized:
+    - Parts in all messages/artifacts are converted to canonical (flattened) form.
+    - v0.3: strips kind, unnests file fields, renames mimeType/name/uri/bytes.
+    - v1.0: unwraps oneof wrapper (task/message), adds `kind` field,
+      normalizes SCREAMING_SNAKE states/roles, normalizes parts.
     """
-    Normalizes JSON-RPC response to canonical format.
-    Handles both direct responses and result-wrapped responses.
-    """
-    if version == "0.3":
-        # Normalize parts in v0.3 response
-        target = raw.get("result", raw)
-        _normalize_parts_in_result(target, version)
+    if version != "1.0":
+        _normalize_parts_in_result(raw.get("result", raw), version)
         return raw
-    else:  # v1.0
-        # v1.0 uses oneof wrappers (message/task)
-        result = {}
 
-        if "message" in raw:
-            result = raw["message"].copy()
-            result["kind"] = "message"
-            if "role" in result:
-                result["role"] = normalize_role(result["role"])
-            if "parts" in result:
-                result["parts"] = normalize_inbound_parts(result["parts"], version)
-        elif "task" in raw:
-            result = raw["task"].copy()
-            result["kind"] = "task"
-            _normalize_v10_task(result, version)
-        else:
-            result = raw.copy()
+    inner = raw.get("result", raw)
 
-        return result
+    if "task" in inner and isinstance(inner["task"], dict):
+        task = inner["task"]
+        task["kind"] = "task"
+        _normalize_v10_task(task, version)
+        return {"result": task}
+
+    if "message" in inner and isinstance(inner["message"], dict) and "parts" in inner["message"]:
+        msg = inner["message"]
+        msg["kind"] = "message"
+        if "role" in msg:
+            msg["role"] = normalize_role(msg["role"])
+        if "parts" in msg:
+            msg["parts"] = normalize_inbound_parts(msg["parts"], version)
+        return {"result": msg}
+
+    if "status" in inner:
+        _normalize_v10_task(inner, version)
+
+    return raw
 
 
 def _normalize_v10_task(task: dict, version: str) -> None:
-    """Normalizes task fields in place"""
-    if "state" in task:
-        task["state"] = normalize_task_state(task["state"])
-    if "artifacts" in task:
-        task["artifacts"] = normalize_inbound_parts(task["artifacts"], version)
+    """Normalize task fields (states, roles, parts) to canonical form in place."""
+    status = task.get("status", {})
+    if "state" in status:
+        status["state"] = normalize_task_state(status["state"])
+    msg = status.get("message", {})
+    if "role" in msg:
+        msg["role"] = normalize_role(msg["role"])
+    if "parts" in msg:
+        msg["parts"] = normalize_inbound_parts(msg["parts"], version)
+    for artifact in task.get("artifacts", []):
+        if "parts" in artifact:
+            artifact["parts"] = normalize_inbound_parts(artifact["parts"], version)
 
 
 def _normalize_parts_in_result(inner: dict, version: str) -> None:
-    """Normalizes parts in v0.3 result dict in place"""
+    """Normalize parts in a v0.3 result dict (task or message) in place."""
+    if not isinstance(inner, dict):
+        return
     if "parts" in inner:
         inner["parts"] = normalize_inbound_parts(inner["parts"], version)
+    msg = inner.get("status", {}).get("message", {})
+    if "parts" in msg:
+        msg["parts"] = normalize_inbound_parts(msg["parts"], version)
+    for artifact in inner.get("artifacts", []):
+        if "parts" in artifact:
+            artifact["parts"] = normalize_inbound_parts(artifact["parts"], version)
 
 
-# ============================================================================
-# Task 8: Stream Event Classification
-# ============================================================================
+def classify_stream_event(
+    data: dict, version: str,
+) -> tuple[str, dict] | None:
+    """Classify a streaming SSE event and normalize to canonical format.
 
-def classify_stream_event(data: dict, version: str) -> tuple[str, dict] | None:
+    Returns (canonical_event_type, normalized_payload) or None if unrecognized.
+    Both v0.3 and v1.0: parts in the payload are normalized to canonical flattened form.
+    v0.3: uses `kind` discriminator.
+    v1.0: uses ProtoJSON camelCase keys (statusUpdate, artifactUpdate, task, message).
     """
-    Classifies stream event and normalizes payload.
-    Returns (event_type, normalized_payload) or None for unknown events.
-    """
-    if version == "0.3":
-        event_type = data.get("event")
-        if event_type not in {"message", "artifact", "status"}:
-            return None
-
-        payload = data.copy()
-        _normalize_stream_event_parts(payload, version)
-        return event_type, payload
-    else:  # v1.0
+    if version == "1.0":
         return _classify_v10(data)
+
+    kind = data.get("kind", "")
+    if kind in ("status-update", "artifact-update", "task", "message"):
+        _normalize_stream_event_parts(data, version)
+        return (kind, data)
+    return None
 
 
 def _normalize_stream_event_parts(data: dict, version: str) -> None:
-    """Normalizes parts in stream event data in place"""
+    """Normalize parts within a stream event payload in place."""
     if "parts" in data:
         data["parts"] = normalize_inbound_parts(data["parts"], version)
+    artifact = data.get("artifact", {})
+    if "parts" in artifact:
+        artifact["parts"] = normalize_inbound_parts(artifact["parts"], version)
+    msg = data.get("status", {}).get("message", {})
+    if "parts" in msg:
+        msg["parts"] = normalize_inbound_parts(msg["parts"], version)
 
 
 def _classify_v10(data: dict) -> tuple[str, dict] | None:
-    """Handles v1.0 ProtoJSON oneof keys"""
+    if "statusUpdate" in data:
+        update = data["statusUpdate"]
+        status = update.get("status", {})
+        if "state" in status:
+            status["state"] = normalize_task_state(status["state"])
+        msg = status.get("message", {})
+        if "role" in msg:
+            msg["role"] = normalize_role(msg["role"])
+        if "parts" in msg:
+            msg["parts"] = normalize_inbound_parts(msg["parts"], "1.0")
+        state = status.get("state", "")
+        update["final"] = state in CANONICAL_TERMINAL_STATES
+        update["status"] = status
+        return ("status-update", update)
+
+    if "artifactUpdate" in data:
+        payload = data["artifactUpdate"]
+        artifact = payload.get("artifact", {})
+        if "parts" in artifact:
+            artifact["parts"] = normalize_inbound_parts(artifact["parts"], "1.0")
+        return ("artifact-update", payload)
+
+    if "task" in data:
+        task = data["task"]
+        _normalize_v10_task(task, "1.0")
+        return ("task", task)
+
     if "message" in data:
-        payload = data["message"].copy()
-        if "role" in payload:
-            payload["role"] = normalize_role(payload["role"])
-        _normalize_stream_event_parts(payload, "1.0")
-        return "message", payload
-    elif "artifact" in data:
-        payload = data["artifact"].copy()
-        _normalize_stream_event_parts(payload, "1.0")
-        return "artifact", payload
-    elif "status" in data:
-        payload = data["status"].copy()
-        if "state" in payload:
-            payload["state"] = normalize_task_state(payload["state"])
-            # Set final flag based on terminal state membership
-            payload["final"] = payload["state"] in CANONICAL_TERMINAL_STATES
-        else:
-            payload["final"] = False
-        return "status", payload
+        msg = data["message"]
+        if "role" in msg:
+            msg["role"] = normalize_role(msg["role"])
+        if "parts" in msg:
+            msg["parts"] = normalize_inbound_parts(msg["parts"], "1.0")
+        return ("message", msg)
 
     return None
 
 
-# ============================================================================
-# Task 9: JSON-RPC Error Extraction
-# ============================================================================
-
 def extract_jsonrpc_error(raw: dict) -> JsonRpcError | None:
-    """
-    Extracts JSON-RPC error from response.
-    Returns None if no valid error present.
-    """
-    if "error" not in raw:
+    """Extract a JSON-RPC error from a response dict, or None if no error."""
+    err = raw.get("error")
+    if not err or not isinstance(err, dict):
         return None
-
-    error_obj = raw["error"]
-
-    # Validate required fields
-    if not isinstance(error_obj, dict):
-        return None
-    if "code" not in error_obj or "message" not in error_obj:
-        return None
-    if not isinstance(error_obj["code"], int):
-        return None
-
     return JsonRpcError(
-        code=error_obj["code"],
-        message=error_obj["message"],
-        data=error_obj.get("data")
+        code=err.get("code", 0),
+        message=err.get("message", ""),
+        data=err.get("data"),
     )
