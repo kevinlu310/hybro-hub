@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-05-04
+
+### Fixed
+
+- Fix `normalize_inbound_parts` guard conditions for empty/malformed A2A parts
+- Suppress duplicate terminal agent response after stream output
+- Fix local agent working dir handling
+
 ## [0.1.18] - 2026-04-23
 
 ### Added
