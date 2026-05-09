@@ -302,7 +302,7 @@ def normalize_inbound_parts(parts: list[dict], version: str) -> list[dict]:
         kind = p.get("kind", "")
         if kind == "text":
             if "text" not in p:
-                logger.warning("Dropping text part with missing 'text' key: %r", p)
+                logger.debug("Dropping text part with missing 'text' key: %r", p)
                 continue
             text_val = p.get("text")
             out: dict[str, Any] = {"text": text_val if text_val is not None else ""}
