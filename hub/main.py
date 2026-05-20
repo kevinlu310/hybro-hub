@@ -56,6 +56,10 @@ class HubDaemon:
         self._drain_task: asyncio.Task | None = None
         self._startup_drain_task: asyncio.Task | None = None
         self._run_task: asyncio.Task | None = None
+        # In-flight dispatch tasks keyed by agent_message_id.
+        # Allows cancel_task events to interrupt an ongoing streaming dispatch
+        # without waiting for it to complete naturally.
+        self._inflight_tasks: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
         """Main entry point — run the hub daemon."""
@@ -178,6 +182,9 @@ class HubDaemon:
             for t in background_tasks:
                 t.cancel()
             await asyncio.gather(*background_tasks, return_exceptions=True)
+            # Cancel and drain any in-flight dispatch tasks so that streaming
+            # loops don't linger after the event loop exits.
+            await self._cancel_inflight_tasks()
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
         """Handle a relay event based on its type."""
@@ -188,14 +195,40 @@ class HubDaemon:
             return
 
         if event_type == "user_reply":
-            await self._handle_user_reply(event)
+            agent_message_id = event.get("agent_message_id", "")
+            self._spawn_dispatch(agent_message_id, self._handle_user_reply(event))
             return
 
         if event_type != "user_message":
             logger.warning("Unhandled relay event type: %s", event_type)
             return
 
-        await self._handle_user_message(event)
+        agent_message_id = event.get("agent_message_id", "")
+        self._spawn_dispatch(agent_message_id, self._handle_user_message(event))
+
+    def _spawn_dispatch(self, agent_message_id: str, coro) -> None:
+        """Wrap a dispatch coroutine in an asyncio.Task and track it.
+
+        The task is keyed by agent_message_id so that a concurrent
+        cancel_task event can cancel it immediately rather than waiting
+        for the streaming loop to drain.
+        """
+        task = asyncio.create_task(coro)
+        if agent_message_id:
+            self._inflight_tasks[agent_message_id] = task
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._inflight_tasks.pop(agent_message_id, None)
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "Dispatch task for %s raised an exception",
+                        agent_message_id,
+                        exc_info=exc,
+                    )
+
+        task.add_done_callback(_on_done)
 
     async def _handle_user_message(self, event: dict[str, Any]) -> None:
         """Handle a user_message relay event."""
@@ -264,11 +297,28 @@ class HubDaemon:
                 await self._sync_agents()
 
     async def _handle_cancel_task(self, event: dict[str, Any]) -> None:
-        """Best-effort cancellation of an in-flight task on a local agent."""
+        """Best-effort cancellation of an in-flight task on a local agent.
+
+        Two-pronged approach:
+        1. Cancel the local asyncio Task that is streaming batches from the
+           dispatcher — this stops further publish calls immediately.
+        2. Forward a cancel_task RPC to the local agent so it can cleanly
+           abort its own work (requires a task_id).
+        """
         local_agent_id = event.get("local_agent_id")
         agent_message_id = event.get("agent_message_id")
         task_id = event.get("task_id")
 
+        # --- Step 1: cancel the in-flight dispatch task ---
+        if agent_message_id:
+            inflight = self._inflight_tasks.pop(agent_message_id, None)
+            if inflight and not inflight.done():
+                logger.info(
+                    "Cancelling in-flight dispatch task for msg=%s", agent_message_id
+                )
+                inflight.cancel()
+
+        # --- Step 2: forward cancel RPC to the local agent ---
         agent = self.registry.get_agent(local_agent_id) if local_agent_id else None
         if not agent:
             logger.warning(
@@ -278,7 +328,11 @@ class HubDaemon:
             return
 
         if not task_id:
-            logger.info("cancel_task without task_id — cannot forward to agent")
+            logger.info(
+                "cancel_task without task_id for msg=%s — "
+                "in-flight dispatch task cancelled; cannot forward RPC to agent",
+                agent_message_id,
+            )
             return
 
         logger.info("Forwarding cancel_task to %s (task=%s)", agent.name, task_id)
@@ -448,6 +502,17 @@ class HubDaemon:
         logger.info("Synced %d agents to cloud", len(synced))
 
     # ──── Shutdown ────
+
+    async def _cancel_inflight_tasks(self) -> None:
+        """Cancel and await all in-flight dispatch tasks."""
+        tasks = list(self._inflight_tasks.values())
+        self._inflight_tasks.clear()
+        if not tasks:
+            return
+        logger.info("Cancelling %d in-flight dispatch task(s)", len(tasks))
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _signal_shutdown(self) -> None:
         logger.info("Shutdown signal received")
