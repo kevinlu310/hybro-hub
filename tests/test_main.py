@@ -21,6 +21,7 @@ def _make_daemon() -> HubDaemon:
     daemon.config = MagicMock()
     daemon.config.heartbeat_interval = 30
     daemon._shutdown_event = asyncio.Event()
+    daemon._inflight_tasks = {}
     return daemon
 
 
@@ -249,6 +250,164 @@ class TestHandleCancelTaskHappyPath:
         await daemon._handle_cancel_task(event)
 
 
+class TestHandleCancelTaskCancelsInflightTask:
+    async def test_cancels_inflight_asyncio_task(self):
+        """cancel_task must cancel the in-flight dispatch asyncio.Task."""
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+        daemon.dispatcher.cancel_task = AsyncMock()
+
+        # Simulate an in-flight task that is still running
+        was_cancelled = False
+
+        async def _long_dispatch():
+            nonlocal was_cancelled
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                was_cancelled = True
+                raise
+
+        inflight = asyncio.create_task(_long_dispatch())
+        daemon._inflight_tasks["amsg-99"] = inflight
+
+        event = {
+            "type": "cancel_task",
+            "local_agent_id": "agent-1",
+            "agent_message_id": "amsg-99",
+            "task_id": "task-42",
+        }
+        await daemon._handle_cancel_task(event)
+
+        # Give the event loop a tick to propagate the cancellation
+        await asyncio.sleep(0)
+
+        assert inflight.cancelled()
+        assert "amsg-99" not in daemon._inflight_tasks
+
+    async def test_removes_inflight_task_from_registry(self):
+        """After cancel, the agent_message_id must be removed from _inflight_tasks."""
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+        daemon.dispatcher.cancel_task = AsyncMock()
+
+        inflight = asyncio.create_task(asyncio.sleep(60))
+        daemon._inflight_tasks["amsg-77"] = inflight
+
+        await daemon._handle_cancel_task({
+            "type": "cancel_task",
+            "local_agent_id": "agent-1",
+            "agent_message_id": "amsg-77",
+            "task_id": "task-77",
+        })
+
+        assert "amsg-77" not in daemon._inflight_tasks
+        inflight.cancel()  # cleanup
+
+    async def test_cancel_without_inflight_task_still_forwards_rpc(self):
+        """cancel_task with no in-flight task still forwards the RPC to the agent."""
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+        daemon.dispatcher.cancel_task = AsyncMock()
+
+        # No entry in _inflight_tasks
+        await daemon._handle_cancel_task({
+            "type": "cancel_task",
+            "local_agent_id": "agent-1",
+            "agent_message_id": "amsg-55",
+            "task_id": "task-55",
+        })
+
+        daemon.dispatcher.cancel_task.assert_called_once_with(AGENT, "task-55")
+
+
+class TestSpawnDispatch:
+    async def test_tracks_task_in_inflight(self):
+        """_spawn_dispatch registers the task under agent_message_id."""
+        daemon = _make_daemon()
+
+        ready = asyncio.Event()
+
+        async def _work():
+            ready.set()
+            await asyncio.sleep(60)
+
+        daemon._spawn_dispatch("amsg-spawn", _work())
+        await asyncio.wait_for(ready.wait(), timeout=1)
+
+        assert "amsg-spawn" in daemon._inflight_tasks
+        daemon._inflight_tasks["amsg-spawn"].cancel()
+
+    async def test_removes_task_on_completion(self):
+        """_spawn_dispatch removes the task from _inflight_tasks when it finishes."""
+        daemon = _make_daemon()
+        done = asyncio.Event()
+
+        async def _quick():
+            pass
+
+        daemon._spawn_dispatch("amsg-done", _quick())
+        # Wait for the task to finish naturally
+        task = daemon._inflight_tasks.get("amsg-done")
+        if task:
+            await asyncio.wait_for(task, timeout=1)
+        # Give the done-callback a tick
+        await asyncio.sleep(0)
+
+        assert "amsg-done" not in daemon._inflight_tasks
+
+    async def test_rejects_duplicate_agent_message_id(self):
+        """_spawn_dispatch ignores a replay if a task for the same id is still running."""
+        daemon = _make_daemon()
+        started = asyncio.Event()
+
+        async def _long():
+            started.set()
+            await asyncio.sleep(60)
+
+        daemon._spawn_dispatch("amsg-dup", _long())
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        original_task = daemon._inflight_tasks["amsg-dup"]
+
+        # Attempt a duplicate spawn — should be rejected
+        duplicate_ran = False
+
+        async def _duplicate():
+            nonlocal duplicate_ran
+            duplicate_ran = True
+
+        daemon._spawn_dispatch("amsg-dup", _duplicate())
+        await asyncio.sleep(0)
+
+        assert not duplicate_ran
+        assert daemon._inflight_tasks["amsg-dup"] is original_task
+        original_task.cancel()
+
+    async def test_done_callback_does_not_corrupt_replacement(self):
+        """If a task is manually replaced, the old callback must not evict the new entry."""
+        daemon = _make_daemon()
+
+        async def _quick():
+            pass
+
+        # Spawn a task that completes quickly
+        daemon._spawn_dispatch("amsg-replace", _quick())
+        old_task = daemon._inflight_tasks["amsg-replace"]
+        await asyncio.wait_for(old_task, timeout=1)
+
+        # Simulate a replacement placed BEFORE the done-callback fires
+        sentinel_task = asyncio.create_task(asyncio.sleep(60))
+        daemon._inflight_tasks["amsg-replace"] = sentinel_task
+
+        # Give the old done-callback a tick to run
+        await asyncio.sleep(0)
+
+        # The sentinel must still be tracked
+        assert daemon._inflight_tasks.get("amsg-replace") is sentinel_task
+        sentinel_task.cancel()
+
+
 # ──── _handle_event routing ────
 
 
@@ -264,30 +423,40 @@ class TestHandleEventRouting:
 
     async def test_routes_user_reply(self):
         daemon = _make_daemon()
-        daemon._handle_user_reply = AsyncMock()
-        event = {"type": "user_reply"}
+        spawned: list[tuple] = []
+        daemon._spawn_dispatch = lambda mid, coro: spawned.append((mid, coro))
+        event = {"type": "user_reply", "agent_message_id": "amsg-1"}
 
         await daemon._handle_event(event)
 
-        daemon._handle_user_reply.assert_called_once_with(event)
+        assert len(spawned) == 1
+        assert spawned[0][0] == "amsg-1"
 
     async def test_routes_user_message_by_default(self):
         daemon = _make_daemon()
-        daemon._handle_user_message = AsyncMock()
-        event = {"type": "user_message"}
+        spawned: list[tuple] = []
+
+        def _capture(mid, coro):
+            spawned.append((mid, coro))
+            coro.close()  # prevent "coroutine never awaited" warning
+
+        daemon._spawn_dispatch = _capture
+        event = {"type": "user_message", "agent_message_id": "amsg-2"}
 
         await daemon._handle_event(event)
 
-        daemon._handle_user_message.assert_called_once_with(event)
+        assert len(spawned) == 1
+        assert spawned[0][0] == "amsg-2"
 
     async def test_unknown_type_is_ignored(self):
         daemon = _make_daemon()
-        daemon._handle_user_message = AsyncMock()
+        spawned: list[tuple] = []
+        daemon._spawn_dispatch = lambda mid, coro: spawned.append((mid, coro))
         event = {"type": "something_new"}
 
         await daemon._handle_event(event)
 
-        daemon._handle_user_message.assert_not_called()
+        assert spawned == []
 
 
 # ──── _heartbeat_loop ────
