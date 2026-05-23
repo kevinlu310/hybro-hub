@@ -213,12 +213,23 @@ class HubDaemon:
         cancel_task event can cancel it immediately rather than waiting
         for the streaming loop to drain.
         """
+        if agent_message_id:
+            existing = self._inflight_tasks.get(agent_message_id)
+            if existing and not existing.done():
+                logger.warning(
+                    "Duplicate dispatch for msg=%s — ignoring replay",
+                    agent_message_id[:8],
+                )
+                coro.close()
+                return
+
         task = asyncio.create_task(coro)
         if agent_message_id:
             self._inflight_tasks[agent_message_id] = task
 
         def _on_done(t: asyncio.Task) -> None:
-            self._inflight_tasks.pop(agent_message_id, None)
+            if self._inflight_tasks.get(agent_message_id) is t:
+                del self._inflight_tasks[agent_message_id]
             if not t.cancelled():
                 exc = t.exception()
                 if exc is not None:

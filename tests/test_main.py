@@ -356,6 +356,57 @@ class TestSpawnDispatch:
 
         assert "amsg-done" not in daemon._inflight_tasks
 
+    async def test_rejects_duplicate_agent_message_id(self):
+        """_spawn_dispatch ignores a replay if a task for the same id is still running."""
+        daemon = _make_daemon()
+        started = asyncio.Event()
+
+        async def _long():
+            started.set()
+            await asyncio.sleep(60)
+
+        daemon._spawn_dispatch("amsg-dup", _long())
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        original_task = daemon._inflight_tasks["amsg-dup"]
+
+        # Attempt a duplicate spawn — should be rejected
+        duplicate_ran = False
+
+        async def _duplicate():
+            nonlocal duplicate_ran
+            duplicate_ran = True
+
+        daemon._spawn_dispatch("amsg-dup", _duplicate())
+        await asyncio.sleep(0)
+
+        assert not duplicate_ran
+        assert daemon._inflight_tasks["amsg-dup"] is original_task
+        original_task.cancel()
+
+    async def test_done_callback_does_not_corrupt_replacement(self):
+        """If a task is manually replaced, the old callback must not evict the new entry."""
+        daemon = _make_daemon()
+
+        async def _quick():
+            pass
+
+        # Spawn a task that completes quickly
+        daemon._spawn_dispatch("amsg-replace", _quick())
+        old_task = daemon._inflight_tasks["amsg-replace"]
+        await asyncio.wait_for(old_task, timeout=1)
+
+        # Simulate a replacement placed BEFORE the done-callback fires
+        sentinel_task = asyncio.create_task(asyncio.sleep(60))
+        daemon._inflight_tasks["amsg-replace"] = sentinel_task
+
+        # Give the old done-callback a tick to run
+        await asyncio.sleep(0)
+
+        # The sentinel must still be tracked
+        assert daemon._inflight_tasks.get("amsg-replace") is sentinel_task
+        sentinel_task.cancel()
+
 
 # ──── _handle_event routing ────
 
