@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "a2a-adapter"
-version = "0.2.10"
+version = "0.2.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -17,9 +17,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/17/a1/9445c5b118e293b8d770b0228af61ac358068c5d119221ee9f2b1c5396ee/a2a_adapter-0.2.10.tar.gz", hash = "sha256:eeeae3b28e1ff69277f421dc1ac79e28ae5e09ed6ea8c98f9261e196cd8a2667", size = 87967, upload-time = "2026-04-23T02:58:09.716Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/a5/c5c81d48d4ce65b8690feba21b64d60487a1db0c3b26eb9d1aec8eedd8f1/a2a_adapter-0.2.11.tar.gz", hash = "sha256:34fd561801f198a7c2e03c8c55e655497b90d4872cf3c65c9fe343609bcc1330", size = 88879, upload-time = "2026-05-04T22:21:05.401Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/74/0bbc661e1de91a4350a6bf3bdb4d66b201735ed63ccbac0775cde8b1a4ca/a2a_adapter-0.2.10-py3-none-any.whl", hash = "sha256:fd958c08bb6a0e288604ead90c77edf4f09e2b519c46b2ad05bb4cbf4aa1855f", size = 93739, upload-time = "2026-04-23T02:58:08.098Z" },
+    { url = "https://files.pythonhosted.org/packages/29/5f/79d01c404b76f2c0e0f5f453b42eb24bd8c0234b809f094b3a5502f9b3c1/a2a_adapter-0.2.11-py3-none-any.whl", hash = "sha256:24495bceb6b7aa3eeb9a50a664ab7aa5d33015510dd3823441f2e8fdc96c64a2", size = 94222, upload-time = "2026-05-04T22:21:03.87Z" },
 ]
 
 [[package]]
@@ -500,7 +500,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-adapter", specifier = ">=0.2.9,<1" },
+    { name = "a2a-adapter", specifier = ">=0.2.11,<1" },
     { name = "a2a-sdk", specifier = ">=1.0.1,<2" },
     { name = "click", specifier = ">=8.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
