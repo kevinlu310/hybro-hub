@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+### Added
+
+- Non-blocking dispatch: `user_message` and `user_reply` handling are now wrapped in `asyncio` Tasks via `_spawn_dispatch`, keyed by `agent_message_id`; all in-flight tasks are drained on shutdown
+- Immediate cancel support: `cancel_task` events cancel the corresponding in-flight dispatch Task before forwarding the RPC to the agent
+- In-flight task tracking to prevent duplicate spawns — relay replays of the same `agent_message_id` are rejected while a dispatch is still running
+
+### Fixed
+
+- Scope done-callbacks to their own task entry so a stale callback from an old dispatch cannot evict a newer in-flight task from the tracking dict
+
+### Changed
+
+- Reduce excessive log noise in `a2a_compat.py`
+
 ## [0.1.19] - 2026-05-04
 
 ### Fixed
