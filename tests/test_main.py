@@ -565,14 +565,16 @@ class TestHeartbeatLoop:
 
 class TestHandleUserReplyCanonicalParts:
     async def test_hitl_reply_uses_flattened_parts(self):
-        """HITL reply must use canonical flattened parts (no 'kind')."""
+        """Legacy reply_text path uses canonical flattened parts (no 'kind')."""
         daemon = _make_daemon()
         daemon.registry.get_agent.return_value = AGENT
 
         dispatched_message = {}
+        dispatched_user_message_id = {}
 
         async def _capture_dispatch(**kwargs):
             dispatched_message.update(kwargs.get("message_dict", {}))
+            dispatched_user_message_id["value"] = kwargs.get("user_message_id")
             yield [{"type": "agent_response", "agent_message_id": "amsg-12345678", "data": {"content": "ok"}}]
 
         daemon.dispatcher.dispatch = _capture_dispatch
@@ -583,6 +585,45 @@ class TestHandleUserReplyCanonicalParts:
         assert len(parts) == 1
         assert "kind" not in parts[0]
         assert parts[0]["text"] == "yes"
+        assert dispatched_user_message_id["value"] is None
+
+    async def test_hitl_reply_uses_full_message_payload_when_present(self):
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+
+        captured = {}
+
+        async def _capture_dispatch(**kwargs):
+            captured.update(kwargs)
+            yield [{"type": "agent_response", "agent_message_id": "amsg-12345678", "data": {"content": "ok"}}]
+
+        daemon.dispatcher.dispatch = _capture_dispatch
+
+        await daemon._handle_user_reply(
+            _full_user_reply_event(
+                message={
+                    "kind": "message",
+                    "role": "user",
+                    "parts": [
+                        {"kind": "text", "text": "publish"},
+                        {
+                            "kind": "file",
+                            "file": {
+                                "uri": "https://s3.example/file.png",
+                                "mimeType": "image/png",
+                                "name": "photo.png",
+                            },
+                        },
+                    ],
+                },
+                user_message_id="user-turn-1",
+                reply_text="publish",
+            )
+        )
+
+        message_dict = captured["message_dict"]
+        assert message_dict["parts"][1]["kind"] == "file"
+        assert captured["user_message_id"] == "user-turn-1"
 
 
 class TestLocalAgentDefaultInterface:
