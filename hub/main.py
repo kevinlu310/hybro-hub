@@ -372,6 +372,7 @@ class HubDaemon:
                     room_id, agent_message_id,
                     error="Incomplete user_reply event received by hub",
                     error_type="InvalidEvent",
+                    user_message_id=user_message_id,
                 )
             return
 
@@ -382,6 +383,7 @@ class HubDaemon:
                 room_id, agent_message_id,
                 error=f"Agent '{local_agent_id}' is no longer available on this hub",
                 error_type="AgentNotFound",
+                user_message_id=user_message_id,
             )
             return
 

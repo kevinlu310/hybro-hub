@@ -151,7 +151,9 @@ class TestHandleUserReplyAgentNotFound:
         daemon = _make_daemon()
         daemon.registry.get_agent.return_value = None
 
-        await daemon._handle_user_reply(_full_user_reply_event())
+        await daemon._handle_user_reply(
+            _full_user_reply_event(user_message_id="user-turn-1"),
+        )
 
         daemon.relay.publish.assert_called_once()
         room_id, events = daemon.relay.publish.call_args[0]
@@ -160,18 +162,34 @@ class TestHandleUserReplyAgentNotFound:
         assert events[0]["data"]["error_type"] == "AgentNotFound"
         assert events[1]["type"] == "processing_status"
         assert events[1]["data"]["status"] == "failed"
+        assert events[1]["data"]["user_message_id"] == "user-turn-1"
 
 
 class TestHandleUserReplyIncompleteEvent:
     async def test_publishes_failure_when_local_agent_id_missing(self):
         daemon = _make_daemon()
-        event = _full_user_reply_event(local_agent_id=None)
+        event = _full_user_reply_event(
+            local_agent_id=None,
+            user_message_id="user-turn-1",
+        )
 
         await daemon._handle_user_reply(event)
 
         daemon.relay.publish.assert_called_once()
         _, events = daemon.relay.publish.call_args[0]
         assert events[0]["data"]["error_type"] == "InvalidEvent"
+        assert events[1]["data"]["user_message_id"] == "user-turn-1"
+
+    async def test_uses_originating_user_message_id_on_failure(self):
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = None
+
+        await daemon._handle_user_reply(
+            _full_user_reply_event(originating_user_message_id="user-turn-2"),
+        )
+
+        _, events = daemon.relay.publish.call_args[0]
+        assert events[1]["data"]["user_message_id"] == "user-turn-2"
 
     async def test_no_publish_when_room_id_and_msg_id_both_missing(self):
         daemon = _make_daemon()
